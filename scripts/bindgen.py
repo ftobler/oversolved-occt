@@ -10,13 +10,20 @@ Naming follows opencascade.js, which the Oversolved kernel was written against:
   - with several, constructor N becomes its own JS class C_N deriving from C;
   - an overloaded method name M is bound as M_1, M_2, ...;
   - N is the 1-based position among the public, non-deleted declarations of
-    that name in header order, so a skipped overload leaves a gap, never a shift.
+    that name in header order, deprecated ones included. A member that is not
+    bound leaves a gap in the numbering, never a shift.
 
 Every member binds through a wrapper lambda with its parameter types spelled
 out, which selects the overload and lets a C string travel as a JS string.
-Members embind has no form for (primitive out-parameters, primitive pointers,
-streams, rvalues) are skipped and listed at the end of the output, and
-bindings/skip.txt drops members by JS name when they fail to compile.
+
+A member whose signature names a type that is not bound would register but
+throw when called, so it is skipped instead. That covers a class missing from
+classes.txt, a handle to one, a nested type, primitive out-parameters, streams
+and rvalues. Deprecated members are skipped too. Every skip is listed at the
+end of the output with its reason. bindings/skip.txt drops further members by
+JS name (`Class::Method_N`, `Class_N` for constructor N, `Class` for a single
+constructor) and a line that matches nothing is an error. A handle to a bound
+class is registered as Handle_<Class> whenever a bound member uses it.
 
 Usage: bindgen.py --include <occt include dir> --out <bindings.cpp>
 """
@@ -25,21 +32,27 @@ import argparse
 import json
 import re
 import subprocess
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 CLASSES = REPO / "bindings" / "classes.txt"
+MANUAL = REPO / "bindings" / "manual.txt"
 SKIP = REPO / "bindings" / "skip.txt"
 
 PRIMITIVE = re.compile(
-    r"^(bool|char|short|int|long|unsigned|signed|float|double|size_t|void|"
-    r"Standard_(Boolean|Integer|Real|ShortReal|Character|Byte|Size|Address))\b"
+    r"^(void|bool|char|signed char|unsigned char|short|unsigned short|int|unsigned|"
+    r"unsigned int|long|unsigned long|long long|unsigned long long|float|double|size_t|"
+    r"Standard_(Boolean|Integer|Real|ShortReal|Character|ExtCharacter|Byte|Size|Address)|"
+    r"Poly_MeshPurpose)$"  # a typedef of unsigned int, with its values as plain constants
 )
 C_STRING = re.compile(r"^(const )?(Standard_CString|(const )?char \*( ?const)?)$")
+HANDLE = re.compile(r"^(?:opencascade|occ)::handle<(\w+)>$")
 NOISE = {"DumpJson", "InitFromJson", "Dump", "DynamicType", "get_type_name",
          "get_type_descriptor"}
+NESTED = {"CXXRecordDecl", "TypedefDecl", "TypeAliasDecl", "EnumDecl"}
 
 
 @dataclass
@@ -51,6 +64,7 @@ class Fn:
     static: bool = False
     index: int = 0  # overload position, 0 when the name is not overloaded
     local: bool = False  # typed with a name nested in its class
+    deprecated: bool = False
 
     @property
     def js(self) -> str:
@@ -69,15 +83,20 @@ class Record:
     methods: list[Fn] = field(default_factory=list)
 
 
+# ─── reading the AST ───
+
+
 def dump_ast(name: str, include: Path) -> list[dict]:
     """The top-level declarations named exactly `name`, from its own header."""
     cmd = ["em++", "-x", "c++", "-std=c++17", "-fsyntax-only", f"-I{include}",
            "-Xclang", "-ast-dump=json", "-Xclang", f"-ast-dump-filter={name}", "-"]
-    text = subprocess.run(cmd, input=f"#include <{name}.hxx>\n", capture_output=True,
-                          text=True, check=True).stdout
+    run = subprocess.run(cmd, input=f"#include <{name}.hxx>\n", capture_output=True,
+                         text=True, check=False)  # clang's own message is reported below
+    if run.returncode != 0:
+        raise SystemExit(f"{name}: em++ failed on {name}.hxx\n{run.stderr}")
     decoder, pos, found = json.JSONDecoder(), 0, []
-    while (pos := text.find("{", pos)) != -1:
-        node, pos = decoder.raw_decode(text, pos)
+    while (pos := run.stdout.find("{", pos)) != -1:
+        node, pos = decoder.raw_decode(run.stdout, pos)
         if node.get("name") == name:
             found.append(node)
     return found
@@ -95,28 +114,18 @@ def split_signature(qual: str) -> tuple[str, bool]:
     return qual[:i].strip(), "const" in qual[close:]
 
 
-def unbindable_type(t: str) -> bool:
-    """A type with no JS form, or one that only works as an out-parameter."""
-    if C_STRING.match(t):
-        return False
-    if "&&" in t or "..." in t or "Stream" in t or "stream" in t or "*&" in t:
-        return True
-    if t.endswith("*") or (t.endswith("&") and not t.startswith("const ")):
-        return bool(PRIMITIVE.match(t.removeprefix("const ").rstrip("&* ")))
-    return False
-
-
-def unbindable(fn: Fn) -> bool:
-    return fn.local or any(unbindable_type(t) for t in [fn.ret, *fn.params])
-
-
-NESTED = {"CXXRecordDecl", "TypedefDecl", "TypeAliasDecl", "EnumDecl"}
-
-
-def deprecated(member: dict) -> bool:
+def is_deprecated(member: dict) -> bool:
     """Upstream marks what it is about to remove; binding it would only invite
     the kernel to depend on it."""
     return any(a["kind"] == "DeprecatedAttr" for a in member.get("inner", []))
+
+
+def make_fn(member: dict, static: bool = False) -> Fn:
+    params = [p["type"]["qualType"] for p in member.get("inner", []) if p["kind"] == "ParmVarDecl"]
+    ret, const = split_signature(member["type"]["qualType"])
+    return Fn(member["name"], ret, params, const,
+              static or member.get("storageClass") == "static",
+              deprecated=is_deprecated(member))
 
 
 def parse_record(node: dict) -> Record:
@@ -141,14 +150,10 @@ def parse_record(node: dict) -> Record:
         if kind == "CXXDestructorDecl" and access != "public" and not member.get("isImplicit"):
             rec.hidden_dtor = True
         if (kind not in ("CXXConstructorDecl", "CXXMethodDecl") or access != "public"
-                or member.get("isImplicit") or member.get("explicitlyDeleted")
-                or deprecated(member)):
+                or member.get("isImplicit") or member.get("explicitlyDeleted")):
             continue
-        params = [p["type"]["qualType"] for p in member.get("inner", [])
-                  if p["kind"] == "ParmVarDecl"]
-        ret, const = split_signature(member["type"]["qualType"])
-        fn = Fn(member["name"], ret, params, const, member.get("storageClass") == "static")
-        fn.local = bool(local and any(local.search(t) for t in [ret, *params]))
+        fn = make_fn(member)
+        fn.local = bool(local and any(local.search(t) for t in [fn.ret, *fn.params]))
         if kind == "CXXConstructorDecl":
             rec.ctors.append(fn)
         elif not fn.name.startswith("operator") and fn.name not in NOISE:
@@ -161,31 +166,115 @@ def parse_record(node: dict) -> Record:
 def parse_namespace(name: str, nodes: list[dict]) -> Record:
     """OCCT 8 turned static-only classes (TopoDS, BRep_Tool) into namespaces.
 
-    Their functions bind as class functions of an empty tag class, so JS keeps
-    calling oc.TopoDS.Edge(shape). A namespace may be reopened, so every
-    declaration of it contributes, in header order.
+    Their functions bind as class functions of an empty tag class, as
+    oc.TopoDS.Edge_1(shape). A namespace may be reopened, so every declaration
+    of it contributes in header order; a redeclaration of a function does not
+    count twice.
     """
     rec = Record(name, tag=True)
     for node in nodes:
         for member in node.get("inner", []):
-            if member["kind"] != "FunctionDecl" or member["name"] in NOISE:
+            if (member["kind"] != "FunctionDecl" or member["name"] in NOISE
+                    or member.get("previousDecl") or member.get("explicitlyDeleted")):
                 continue
-            params = [p["type"]["qualType"] for p in member.get("inner", [])
-                      if p["kind"] == "ParmVarDecl"]
-            ret, _ = split_signature(member["type"]["qualType"])
-            rec.methods.append(Fn(member["name"], ret, params, static=True))
+            rec.methods.append(make_fn(member, static=True))
     number_overloads(rec.methods)
     return rec
 
 
 def number_overloads(fns: list[Fn]) -> None:
-    total: dict[str, int] = {}
-    for fn in fns:
-        total[fn.name] = total.get(fn.name, 0) + 1
-    seen: dict[str, int] = {}
+    total = Counter(fn.name for fn in fns)
+    seen: Counter[str] = Counter()
     for fn in fns:
         if total[fn.name] > 1:
-            seen[fn.name] = fn.index = seen.get(fn.name, 0) + 1
+            seen[fn.name] += 1
+            fn.index = seen[fn.name]
+
+
+# ─── what can be bound ───
+
+
+def core(t: str) -> str:
+    """The named type under const, references, pointers and qualifiers."""
+    t = re.sub(r"\b(const|volatile|struct|class|enum)\b", "", t)
+    return re.sub(r"\s+", " ", t.replace("&", " ").replace("*", " ")).strip()
+
+
+def no_js_form(t: str) -> bool:
+    """A type with no JS form, or one that only works as an out-parameter."""
+    if C_STRING.match(t):
+        return False
+    if "&&" in t or "..." in t or "Stream" in t or "stream" in t or "*&" in t:
+        return True
+    if t.endswith("*") or (t.endswith("&") and not t.startswith("const ")):
+        return bool(PRIMITIVE.match(core(t)))
+    return False
+
+
+class Binder:
+    """Decides what is bound, and accumulates what the output needs to say."""
+
+    def __init__(self, include: Path, records: dict[str, Record], enums: dict[str, list[str]],
+                 manual: set[str], skip: set[str]) -> None:
+        self.include, self.records, self.enums = include, records, enums
+        self.manual, self.skip = manual, skip
+        self.considered: set[str] = set()
+        self.skipped: list[tuple[str, str]] = []
+        self.handles: set[str] = set()  # targets to register as Handle_<T>
+        self.words: set[str] = set()  # identifiers in bound signatures, for includes
+
+    def type_problem(self, t: str) -> str | None:
+        if C_STRING.match(t):
+            return None
+        if no_js_form(t):
+            return "no JS form"
+        c = core(t)
+        compact = c.replace(" ", "")
+        if PRIMITIVE.match(c):
+            return None
+        if m := HANDLE.match(compact):
+            target = self.records.get(m.group(1))
+            return None if target and not target.hidden_dtor else f"unbound {compact}"
+        rec = self.records.get(c)
+        if (rec and not rec.hidden_dtor) or c in self.enums or compact in self.manual:
+            return None
+        # Anything that is not a builtin, a bound class or a bound enum is unbound,
+        # whether or not it has a header of its own (NCollection_ForwardRangeSentinel
+        # does not), so the list of accepted types is the whitelist above.
+        return f"unbound {compact}"
+
+    def problem(self, fn: Fn) -> str | None:
+        """The first reason this member cannot be bound, or None."""
+        if fn.deprecated:
+            return "deprecated"
+        if fn.local:
+            return "nested type"
+        for t in [fn.ret, *fn.params]:
+            if reason := self.type_problem(t):
+                return reason
+        return None
+
+    def accept(self, fn: Fn) -> None:
+        for t in [fn.ret, *fn.params]:
+            self.words.update(re.findall(r"\b\w+\b", t))
+            if m := HANDLE.match(core(t).replace(" ", "")):
+                self.handles.add(m.group(1))
+
+    def drop(self, key: str, reason: str) -> None:
+        self.skipped.append((key, reason))
+
+    def usable(self, key: str, fn: Fn) -> bool:
+        """Whether fn binds; if not, the skip is recorded under key."""
+        self.considered.add(key)
+        reason = "skip.txt" if key in self.skip else self.problem(fn)
+        if reason:
+            self.drop(key, reason)
+            return False
+        self.accept(fn)
+        return True
+
+
+# ─── emitting ───
 
 
 def args_and_call(fn: Fn) -> tuple[list[str], list[str]]:
@@ -203,8 +292,8 @@ def args_and_call(fn: Fn) -> tuple[list[str], list[str]]:
 
 def bind_method(rec: str, fn: Fn) -> str:
     """One member as a typed lambda. allow_raw_pointers is passed throughout:
-    OCCT hides pointers behind typedefs (BOPAlgo_PPaveFiller), so the spelled
-    type does not tell, and the policy is inert where nothing is a pointer."""
+    OCCT hides pointers behind typedefs, so the spelled type does not tell, and
+    the policy is inert where nothing is a pointer."""
     args, call = args_and_call(fn)
     if not fn.static:
         args.insert(0, f"{'const ' if fn.const else ''}{rec}& self")
@@ -233,26 +322,22 @@ def bound_base(name: str, records: dict[str, Record]) -> str | None:
     return None
 
 
-def emit_record(rec: Record, records: dict[str, Record], skip: set[str],
-                skipped: list[str]) -> tuple[list[str], str]:
+def emit_record(rec: Record, b: Binder) -> tuple[list[str], str]:
     """The overload subclasses and the class_ registrations of one record."""
     structs: list[str] = []
     if rec.tag:
         structs.append(f"struct Bind_{rec.name} {{}};")
         lines = [f"class_<Bind_{rec.name}>(\"{rec.name}\")"]
     else:
-        base = bound_base(rec.name, records)
+        base = bound_base(rec.name, b.records)
         lines = [f"class_<{rec.name}{f', base<{base}>' if base else ''}>(\"{rec.name}\")"]
     ctors = [] if rec.abstract or rec.tag else rec.ctors
     if not rec.abstract and not rec.tag and not rec.ctors and not rec.hidden_ctor:
         lines.append("    .constructor<>()")
-    elif len(ctors) == 1 and not unbindable(ctors[0]) and rec.name not in skip:
+    elif len(ctors) == 1 and b.usable(rec.name, ctors[0]):
         lines.append("    " + bind_ctor(rec.name, ctors[0]))
     for fn in rec.methods:
-        key = f"{rec.name}::{fn.js}"
-        if key in skip or unbindable(fn):
-            skipped.append(key)
-        else:
+        if b.usable(f"{rec.name}::{fn.js}", fn):
             lines.append(bind_method(rec.name, fn))
     lines[-1] += ";"
 
@@ -260,8 +345,7 @@ def emit_record(rec: Record, records: dict[str, Record], skip: set[str],
     # inheriting `using` would not carry the default or the copy constructor.
     for fn in ctors if len(ctors) > 1 else []:
         js = f"{rec.name}_{fn.index}"
-        if js in skip or unbindable(fn):
-            skipped.append(js)
+        if not b.usable(js, fn):
             continue
         cls = f"Bind_{js}"
         params = ", ".join(f"{t} a{i}" for i, t in enumerate(fn.params))
@@ -289,8 +373,9 @@ def emit_handle(target: str) -> tuple[list[str], str]:
 
 
 def read_list(path: Path) -> list[str]:
+    """One entry per line; `#` starts a comment, on its own line or after an entry."""
     lines = path.read_text().splitlines() if path.exists() else []
-    return [ln.strip() for ln in lines if ln.strip() and not ln.lstrip().startswith("#")]
+    return [entry for ln in lines if (entry := ln.split("#", 1)[0].strip())]
 
 
 def main() -> None:
@@ -300,9 +385,9 @@ def main() -> None:
     opts = ap.parse_args()
 
     wanted = read_list(CLASSES)
-    skip = set(read_list(SKIP))
-    handles = [n.removeprefix("Handle_") for n in wanted if n.startswith("Handle_")]
-    pending = [n for n in wanted if not n.startswith("Handle_")]
+    explicit_handles = [n.removeprefix("Handle_") for n in wanted if n.startswith("Handle_")]
+    # A handle needs its target registered, so a listed handle lists its class too.
+    pending = [n for n in wanted if not n.startswith("Handle_")] + explicit_handles
     records: dict[str, Record] = {}
     enums: dict[str, list[str]] = {}
 
@@ -339,17 +424,23 @@ def main() -> None:
     for name in records:
         visit(name)
 
+    skip = set(read_list(SKIP))
+    manual = {t.replace(" ", "") for t in read_list(MANUAL)}
+    binder = Binder(opts.include, records, enums, manual, skip)
+    binder.handles.update(explicit_handles)
+
     structs: list[str] = []
     registrations: list[str] = []
-    skipped: list[str] = []
     for name in order:
         if records[name].hidden_dtor:
-            skipped.append(f"{name} (protected destructor)")
+            binder.drop(name, "protected destructor")
             continue
-        s, reg = emit_record(records[name], records, skip, skipped)
+        s, reg = emit_record(records[name], binder)
         structs += s
         registrations.append(reg)
-    for target in handles:
+    if stale := sorted(skip - binder.considered):
+        raise SystemExit("bindings/skip.txt matches nothing: " + ", ".join(stale))
+    for target in sorted(binder.handles):
         s, reg = emit_handle(target)
         structs += s
         registrations.append(reg)
@@ -358,11 +449,10 @@ def main() -> None:
                              + "".join(f"\n    .value(\"{v}\", {v})" for v in values) + ";")
 
     # A bound member may return or take a type its class only forward-declares,
-    # so every OCCT type named in a signature brings in its own header.
-    named = {word for rec in records.values() for fn in [*rec.ctors, *rec.methods]
-             for t in [fn.ret, *fn.params] for word in re.findall(r"\b\w+\b", t)}
-    headers = sorted({*records, *enums, *handles,
-                      *(w for w in named if (opts.include / f"{w}.hxx").exists())})
+    # so every OCCT type named in a bound signature brings in its own header.
+    headers = sorted({*records, *enums, *binder.handles,
+                      *(w for w in binder.words if (opts.include / f"{w}.hxx").exists())})
+    unbound = Counter(r for _, r in binder.skipped if r.startswith("unbound "))
     out = ["// Generated by scripts/bindgen.py from bindings/classes.txt. Do not edit.",
            "#include <emscripten/bind.h>",
            "#include <string>",
@@ -376,12 +466,16 @@ def main() -> None:
            *registrations,
            "}",
            "",
-           "// Skipped: no JS form, or listed in bindings/skip.txt.",
-           *[f"//   {s}" for s in sorted(set(skipped))]]
+           "// Skipped members, with the reason. List an unbound type in bindings/classes.txt",
+           "// to bind the members that need it.",
+           *[f"//   {k}: {r}" for k, r in sorted(binder.skipped)],
+           "",
+           "// Unbound types by the number of skipped members that name them.",
+           *[f"//   {r.removeprefix('unbound ')}: {n}" for r, n in unbound.most_common()]]
     opts.out.parent.mkdir(parents=True, exist_ok=True)
     opts.out.write_text("\n".join(out) + "\n")
-    print(f"{len(records)} classes, {len(enums)} enums, {len(handles)} handles, "
-          f"{len(set(skipped))} members skipped -> {opts.out}")
+    print(f"{len(records)} classes, {len(enums)} enums, {len(binder.handles)} handles, "
+          f"{len(binder.skipped)} members skipped, {len(unbound)} unbound types -> {opts.out}")
 
 
 if __name__ == "__main__":

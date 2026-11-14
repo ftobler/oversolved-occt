@@ -11,39 +11,59 @@ binding generator and the build recipe.
 The OCCT source is **the source archive of an upstream GitHub release**, named
 in [`occt.pin.json`](occt.pin.json):
 
-| field     | meaning                                                         |
-|-----------|-----------------------------------------------------------------|
-| `release` | the upstream release page, the human-readable source of truth   |
-| `tag`     | its git tag                                                     |
-| `commit`  | the commit that tag points at                                   |
-| `archive` | the tag's source archive (`archive/refs/tags/<tag>.tar.gz`)     |
-| `sha256`  | the archive's digest; a fetch that does not match it fails      |
-| `root`    | the directory the archive unpacks to                            |
+| field     | meaning                                                              |
+|-----------|----------------------------------------------------------------------|
+| `release` | the upstream release page, the human-readable source of truth        |
+| `tag`     | its git tag                                                          |
+| `commit`  | the commit that tag points at; the archive must have been built from it |
+| `archive` | the tag's source archive (`archive/refs/tags/<tag>.tar.gz`)          |
+| `sha256`  | the digest of the archive's uncompressed tar; a mismatch fails the fetch |
+| `root`    | the directory the archive unpacks to                                 |
 
-Only the source archive is used. The binaries attached to the upstream release
-are Windows builds and play no part here.
+The tar is hashed, not the `.tar.gz`, because GitHub does not promise
+byte-stable compression. A fetch also reads the commit id GitHub writes into
+the archive and compares it with `commit`. Only the source archive is used: the
+binaries attached to the upstream release are Windows builds and play no part
+here.
 
 ## Build
 
-Needs `git`, `python3`, `cmake`, `ninja`, `node` and [`just`](https://github.com/casey/just).
-Everything else (the pinned emsdk, the source, the build trees) lands in `tmp/`.
+Needs `git`, `python3` (3.12 or newer), `cmake`, `ninja`, `node` and
+[`just`](https://github.com/casey/just). Everything else (the pinned emsdk, the
+source, the build trees) lands in `tmp/`. A bare `just` lists the recipes.
 
 ```bash
 just build   # toolchain, fetch, occt, bindings, link -> tmp/dist
-just smoke   # load tmp/dist in node: a boolean, a STEP round trip, a throw
+just smoke   # load tmp/dist in node and exercise it
 just clean   # drop tmp/
 ```
 
-The OCCT build takes about 35 minutes on 12 cores. It builds the
-FoundationClasses, ModelingData and ModelingAlgorithms modules plus the STEP
-and STL toolkits and what they depend on. Draw, the viewer and OCAF are left out.
+`just occt` is the long step, tens of minutes even on a fast many-core machine.
+A change to the bindings only needs `just bindings link smoke`. The build
+covers the FoundationClasses, ModelingData and ModelingAlgorithms modules plus
+the STEP and STL toolkits and what they depend on. Draw, the viewer and OCAF are
+left out.
 
 `tmp/dist` then holds:
 
 - `occt.js`: an ES module whose default export instantiates the module (`await occt()`)
 - `occt.wasm`
 - `LICENSE_LGPL_21.txt`, `OCCT_LGPL_EXCEPTION.txt`: OCCT's license, copied from the source archive
-- `manifest.json`: the pin, the emsdk version, this repo's build commit and the sha256 of each file
+- `manifest.json`: the pin, the `emcc` version that built it, this repo's build commit and the sha256 of each file
+
+`just smoke` runs a boolean, a STEP round trip through the in-memory
+filesystem, and a C++ exception crossing into JS. It also calls every
+registered member with no arguments: a member whose signature names an unbound
+type throws "unbound types" at that call, before any argument check, so the
+test fails by name instead of leaving the problem for the first caller.
+
+### Exceptions
+
+C++ exceptions are WebAssembly-native (`-fwasm-exceptions`). A throw reaches JS
+as a `WebAssembly.Exception`; `oc.getExceptionMessage(e)` returns
+`[type, what()]` and `oc.decrementExceptionRefcount(e)` frees it. OCCT's own
+range and null checks stay compiled in (see `occt_checks` in the justfile), so
+an out-of-range index throws `Standard_OutOfRange` rather than reading garbage.
 
 ## Bindings
 
@@ -57,26 +77,47 @@ opencascade.js, which the Oversolved kernel was first written against:
 - several public constructors become one class each, `new oc.gp_Pnt_3(x, y, z)`
 - an overloaded method `M` is bound as `M_1`, `M_2`, ...
 - `N` is the 1-based position among the public, non-deleted declarations of
-  that name in header order
+  that name in header order, deprecated ones included; a member that is not
+  bound leaves a gap, never a shift
 - static-only namespaces (OCCT 8 turned `TopoDS` and others into namespaces)
-  bind as class functions: `oc.TopoDS.Edge(shape)`
-- `Handle_X` binds `opencascade::handle<X>`, built empty (`_1`) or from a pointer (`_2`)
+  bind as class functions, numbered like any overload: `oc.TopoDS.Edge_1(shape)`.
+  Embind has no reference returns, so a non-const overload hands back a copy
+- OCCT has no default arguments in embind: pass every argument, for example
+  `BRep_Tool.Triangulation(face, loc, 0)`
+- `Handle_X` binds `opencascade::handle<X>`, built empty (`_1`) or from a
+  pointer (`_2`), and is registered for every class a bound member takes or
+  returns a handle to
 
-The generator skips any member it cannot express, such as primitive
-out-parameters, streams or deprecated API, and lists each one at the end of the
-generated `tmp/build/bindings.cpp`. A member that fails to compile can be
-dropped by its JS name in `bindings/skip.txt` (`Class::Method_N`, one per line).
-Template instantiations (the NCollection containers, `BRepLProp_SLProps`) are
-bound by hand in [`bindings/manual.cpp`](bindings/manual.cpp).
+A member whose signature names a type that is not bound would register but
+throw when called, so the generator skips it instead. That covers a class
+missing from `classes.txt`, a handle to one, a nested type, primitive
+out-parameters, streams and rvalues. Deprecated members are skipped too. Every
+skip is listed with its reason at the end of the generated
+`tmp/build/bindings.cpp`, followed by the unbound types ranked by how many
+members need them: add a class to `classes.txt` to bind its members.
+
+`bindings/skip.txt` drops further members by JS name, one per line, with an
+optional `# reason`: `Class::Method_N` for a method, `Class_N` for constructor
+N of a class that has several, `Class` for a class's only constructor. A line
+that matches nothing is an error. Template instantiations (the NCollection
+containers, `BRepLProp_SLProps`) are bound by hand in
+[`bindings/manual.cpp`](bindings/manual.cpp), and
+[`bindings/manual.txt`](bindings/manual.txt) lists the spellings it covers so
+the generator counts them as bound.
 
 ## Release
 
 CI builds and smoke-tests every push to `main` or `dev` and every pull request.
 Only `main` releases. A tag `occt-<occt version>-r<n>`, for example
-`occt-8.0.1-r1`, on a commit that is on `main` publishes everything in
-`tmp/dist` as a GitHub release of that name; a tag elsewhere fails the release
-step. `n` counts builds of the same OCCT version: bump it for a
-binding or flag change, and reset it to 1 on a re-pin.
+`occt-8.0.1-r1`, publishes everything in `tmp/dist` as a GitHub release of that
+name. Before building anything, the tag run checks that the tagged commit is on
+`main` and that the version in the tag is the pinned one, and fails fast
+otherwise. `n` counts builds of the same OCCT version: bump it for a binding or
+flag change, and reset it to 1 on a re-pin.
+
+The OCCT build is cached, keyed on the pin and every flag of the `occt` recipe,
+and saved as soon as it succeeds, so a failure further on keeps it. A change to
+the bindings or the link step reuses it.
 
 ## Re-pinning (chore)
 

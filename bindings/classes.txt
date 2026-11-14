@@ -14,6 +14,7 @@ gp_Dir
 gp_Dir2d
 gp_Elips
 gp_Lin
+gp_Pln
 gp_Pnt
 gp_Pnt2d
 gp_Sphere
@@ -38,6 +39,7 @@ Handle_Geom_TrimmedCurve
 
 # ─── topology ───
 TopoDS
+TopoDS_CompSolid
 TopoDS_Compound
 TopoDS_Edge
 TopoDS_Face
@@ -55,6 +57,8 @@ BRepTools_History
 BRepTools_ReShape
 BRepTools_WireExplorer
 Handle_BRepTools_History
+Poly_PolygonOnTriangulation
+Poly_Triangle
 Poly_Triangulation
 
 # ─── construction ───
@@ -122,6 +126,7 @@ BRepBuilderAPI_TransitionMode
 BRepOffset_Mode
 ChFi3d_FilletShape
 ChFiDS_TypeOfConcavity
+Extrema_ExtAlgo
 Extrema_ExtFlag
 GeomAbs_CurveType
 GeomAbs_JoinType

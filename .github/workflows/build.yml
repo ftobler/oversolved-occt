@@ -1,8 +1,9 @@
 # Build and smoke-test the artifact on every push to main or dev and on every
 # pull request. Only main releases: a tag `occt-<version>-r<n>` publishes the
-# build as a GitHub release, and only when the tagged commit is on main. dev
-# builds the same way but can never publish. The steps are the justfile
-# recipes, so CI and a local build cannot drift apart.
+# build as a GitHub release, and only when the tagged commit is on main and the
+# version in the tag is the pinned one. dev builds the same way but can never
+# publish. The steps are the justfile recipes, so CI and a local build cannot
+# drift apart.
 name: build
 
 on:
@@ -12,41 +13,85 @@ on:
   pull_request:
 
 # A newer push to the same ref makes the older run pointless, and a run is long.
+# A tag run is a release in progress, so it is never cancelled.
 concurrency:
   group: build-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 permissions:
-  contents: write  # only the release step writes, and only on a tag
+  contents: read
+
+# bash with pipefail, so a failing command inside a pipeline fails the step.
+defaults:
+  run:
+    shell: bash
 
 jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 300
+    env:
+      # A pull request builds a merge commit; the manifest names the head.
+      BUILD_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # the release guard asks whether the tag is on main
+          fetch-depth: 0  # the tag check asks whether the tag is on main
+
+      # A bad tag fails here, in seconds, not after the whole build.
+      - name: Check the release tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
+            || { echo "::error::$GITHUB_REF_NAME is not on main; only main releases"; exit 1; }
+          python3 scripts/pin.py check-tag "$GITHUB_REF_NAME"
 
       - name: Install just and ninja
         run: sudo apt-get update && sudo apt-get install -y just ninja-build
 
-      # The toolchain and the OCCT libraries are the slow parts. Their keys
-      # cover everything they depend on: the emsdk pin, the source pin and the
-      # build flags, all of which live in the justfile and occt.pin.json.
-      - uses: actions/cache@v4
+      # The keys hold exactly what each cache depends on: the emsdk version for
+      # the toolchain, and for OCCT the source pin, the emsdk version, the flag
+      # variables and the text of the occt recipe. A bindings or link change
+      # leaves both caches valid.
+      - name: Cache keys
+        id: keys
+        run: |
+          emsdk="$(just --evaluate emsdk_version)"
+          flags="$(just --evaluate occt_cxxflags)$(just --evaluate occt_checks)"
+          recipe="$(just --show occt)"
+          echo "emsdk=$emsdk" >> "$GITHUB_OUTPUT"
+          echo "occt=$(printf '%s\n' "$(cat occt.pin.json)" "$emsdk" "$flags" "$recipe" | sha256sum | cut -c1-20)" >> "$GITHUB_OUTPUT"
+
+      # Each cache is saved the moment its step succeeds, not at the end of the
+      # job, so a later failure or a cancel keeps the long OCCT build.
+      - uses: actions/cache/restore@v4
+        id: emsdk-cache
         with:
           path: tmp/emsdk
-          key: emsdk-${{ hashFiles('justfile') }}
-      - uses: actions/cache@v4
+          key: emsdk-${{ steps.keys.outputs.emsdk }}
+      - run: just toolchain
+      - uses: actions/cache/save@v4
+        if: steps.emsdk-cache.outputs.cache-hit != 'true'
+        with:
+          path: tmp/emsdk
+          key: emsdk-${{ steps.keys.outputs.emsdk }}
+
+      - run: just fetch
+
+      - uses: actions/cache/restore@v4
+        id: occt-cache
         with:
           path: tmp/build/occt/install
-          key: occt-${{ hashFiles('occt.pin.json', 'justfile') }}
-
-      - run: just toolchain
-      - run: just fetch
+          key: occt-${{ steps.keys.outputs.occt }}
       - name: just occt (skipped on a cache hit)
-        run: '[ -d tmp/build/occt/install/lib ] || just occt'
+        if: steps.occt-cache.outputs.cache-hit != 'true'
+        run: just occt
+      - uses: actions/cache/save@v4
+        if: steps.occt-cache.outputs.cache-hit != 'true'
+        with:
+          path: tmp/build/occt/install
+          key: occt-${{ steps.keys.outputs.occt }}
+
       - run: just bindings
       - run: just link
       - run: just smoke
@@ -55,13 +100,25 @@ jobs:
         with:
           name: occt
           path: tmp/dist
+          if-no-files-found: error
 
-      - name: Publish the release (tag on main only)
-        if: startsWith(github.ref, 'refs/tags/occt-')
+  # Write access is held by this job alone, and only a tag run reaches it.
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/occt-')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: occt
+          path: dist
+      - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
-            || { echo "::error::$GITHUB_REF_NAME is not on main; only main releases"; exit 1; }
-          gh release create "$GITHUB_REF_NAME" tmp/dist/* \
-            --title "$GITHUB_REF_NAME" --notes-file tmp/dist/manifest.json
+        run: >
+          gh release create "$GITHUB_REF_NAME" dist/*
+          --repo "$GITHUB_REPOSITORY"
+          --title "$GITHUB_REF_NAME"
+          --notes-file dist/manifest.json

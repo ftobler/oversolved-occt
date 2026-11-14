@@ -2,16 +2,21 @@
 #
 # Build OCCT to a single WASM module with JS bindings for Oversolved.
 #
-#   build     toolchain, fetch, occt, bindings, link (the artifact in tmp/dist)
-#   check     smoke (load the artifact in node and compute with it)
-#   chore     repin <tag>
-#   cleanup   clean
+#   build     build chains toolchain, fetch, occt, bindings and link into tmp/dist;
+#             each of the five also runs on its own
+#   smoke     load tmp/dist in node and exercise it
+#   repin     point occt.pin.json at another upstream tag
+#   clean     drop tmp/
 #
 # Everything lands in tmp/: the emsdk, the unpacked source, the build trees and
-# the artifact. The host needs git, python3, cmake and ninja; CI runs these same
-# recipes on a stock runner.
+# the artifact. The host needs git, python3 (3.12 or newer), cmake, ninja and
+# node; CI runs these same recipes on a stock runner. A bare `just` lists them.
 
 set shell := ["bash", "-cuo", "pipefail"]
+
+# Listing is the safe default: a bare `just` must not start a long build.
+default:
+    @just --list
 
 # The toolchain pin. Bumping it is a rebuild of everything, like a re-pin.
 emsdk_version := "6.0.13"
@@ -38,6 +43,14 @@ cxxflags := "-fwasm-exceptions -O3"
 # lands after CMake's -D on the command line, so it wins without a source patch.
 occt_cxxflags := cxxflags + " -UOCC_CONVERT_SIGNALS"
 
+# A Release build of OCCT defines No_Exception by default, which compiles out
+# the range and null checks (Standard_OutOfRange, Standard_NoSuchObject). Header
+# inline code such as NCollection_Array1::Value is also compiled into the
+# bindings, which do not define it, and the linker keeps one copy, so the checks
+# would depend on link order. The kernel indexes arrays from JS, where an
+# unchecked index is silent memory corruption, so the checks stay on everywhere.
+occt_checks := "-DBUILD_RELEASE_DISABLE_EXCEPTIONS=OFF"
+
 
 # ─── build ───
 
@@ -51,17 +64,21 @@ toolchain:
     git -C {{emsdk}} checkout --quiet {{emsdk_version}}
     {{emsdk}}/emsdk install {{emsdk_version}}
     {{emsdk}}/emsdk activate {{emsdk_version}}
+    {{em}} test "$(emcc --version | grep -cF ') {{emsdk_version}} (' || true)" = 1 \
+        || { echo "emcc is not {{emsdk_version}}: emsdk keeps one shared upstream/, reinstall it"; exit 1; }
 
-# Download the pinned upstream source archive, verify its sha256, unpack it.
+# Download the pinned source archive, verify its hash and commit, unpack it.
 fetch:
     python3 scripts/pin.py fetch
 
-# Configure and build the static OCCT libraries. Only the modeling modules and
-# the STEP and STL toolkits (with what they depend on) are built: no Draw, no
-# viewer.
+# Only the modeling modules and the STEP and STL toolkits (with what they
+# depend on) are built: no Draw, no viewer.
+
+# Configure and build the static OCCT libraries.
 occt:
     {{em}} emcmake cmake -S {{occt_src}} -B {{occt_build}} -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
+        {{occt_checks}} \
         -DCMAKE_CXX_FLAGS="{{occt_cxxflags}}" \
         -DBUILD_LIBRARY_TYPE=Static \
         -DINSTALL_DIR={{occt_install}} \
@@ -81,11 +98,13 @@ occt:
 bindings:
     {{em}} python3 scripts/bindgen.py --include {{occt_inc}} --out tmp/build/bindings.cpp
 
-# Compile the bindings and link them with the OCCT libraries into tmp/dist.
 # A C++ throw reaches JS as a WebAssembly.Exception; the exception helpers give
 # the consumer getExceptionMessage(e) -> [type, what()] to name it, and
 # decrementExceptionRefcount(e) to free it once handled.
+
+# Compile the bindings and link them with the OCCT libraries into tmp/dist.
 link:
+    rm -rf {{dist}}
     mkdir -p {{dist}}
     {{em}} em++ {{cxxflags}} -std=c++17 -I{{occt_inc}} \
         tmp/build/bindings.cpp bindings/manual.cpp \
@@ -94,16 +113,18 @@ link:
         -sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=occt \
         -sENVIRONMENT=web,worker,node \
         -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=4GB \
-        -sEXPORTED_RUNTIME_METHODS=FS \
-        -sEXPORT_EXCEPTION_HANDLING_HELPERS=1 \
+        -sEXPORTED_RUNTIME_METHODS=FS,getExceptionMessage,decrementExceptionRefcount \
         -o {{dist}}/occt.js
     cp {{occt_src}}/LICENSE_LGPL_21.txt {{occt_src}}/OCCT_LGPL_EXCEPTION.txt {{dist}}/
-    python3 scripts/manifest.py {{dist}}
+    {{em}} python3 scripts/manifest.py {{dist}} {{emsdk_version}}
 
 
 # ─── check ───
 
-# Load the artifact in node and run a boolean, a STEP round trip and a throw.
+# It runs a boolean, a STEP round trip and a throw, then probes that no
+# registered member names an unbound type.
+
+# Load tmp/dist in node and exercise it.
 smoke:
     node scripts/smoke.mjs {{dist}}
 

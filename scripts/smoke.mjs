@@ -1,8 +1,9 @@
 // Load the built module in node and drive the paths Oversolved depends on:
 // construction, a boolean, mass properties, a STEP round trip through the
-// in-memory FS, and a C++ exception crossing into JS. A green run means the
-// artifact links, instantiates and computes, not that every binding is right;
-// that is the consumer's test suite's job.
+// in-memory FS, a C++ exception crossing into JS, and a probe that no
+// registered member names an unbound type. A green run means the artifact
+// links, instantiates and computes, not that every binding is right; that is
+// the consumer's test suite's job.
 //
 // Usage: node scripts/smoke.mjs <dist dir>
 
@@ -57,5 +58,43 @@ const [type, message] = oc.getExceptionMessage(thrown)
 oc.decrementExceptionRefcount(thrown)
 assert.equal(type, 'StdFail_NotDone', 'the exception names its C++ type')
 console.log(`exceptions: ${type} (${message}) surfaces in JS`)
+
+// Embind registers a member whose signature names an unbound type, and only
+// throws when it is called. The throw sits at the member's own argument count,
+// ahead of any argument or `this` check, so each member is called at every
+// count from 0 to MAX_ARGS with undefined arguments. A real binding fails with
+// a different error (embind rejects undefined for a number before any C++ runs,
+// and `this` is undefined for a method), an unbound one names its missing types.
+// This runs last: a member taking only bools does execute, and could change
+// global state the checks above rely on.
+const MAX_ARGS = 12
+const unbound = new Set()
+const probe = (label, call) => {
+  for (let n = 0; n <= MAX_ARGS; n++) {
+    try {
+      const result = call(Array(n).fill(undefined))
+      if (result && typeof result.delete === 'function') result.delete()
+    } catch (e) {
+      const missing = /unbound types: (.*)$/s.exec(String(e?.message))
+      if (missing) unbound.add(`${label}: ${missing[1]}`)
+    }
+  }
+}
+for (const [name, cls] of Object.entries(oc)) {
+  if (typeof cls !== 'function' || !cls.prototype) continue
+  probe(`new ${name}`, (args) => new cls(...args))
+  for (const key of Object.getOwnPropertyNames(cls)) {
+    if (typeof cls[key] === 'function' && !['length', 'name', 'prototype'].includes(key)) {
+      probe(`${name}.${key}`, (args) => cls[key](...args))
+    }
+  }
+  for (const key of Object.getOwnPropertyNames(cls.prototype)) {
+    if (key !== 'constructor' && typeof cls.prototype[key] === 'function') {
+      probe(`${name}#${key}`, (args) => cls.prototype[key].call(undefined, ...args))
+    }
+  }
+}
+assert.deepEqual([...unbound], [], `members that throw when called:\n  ${[...unbound].slice(0, 25).join('\n  ')}`)
+console.log('bindings: no member names an unbound type')
 
 console.log('smoke: ok')

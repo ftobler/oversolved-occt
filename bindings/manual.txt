@@ -1,0 +1,9 @@
+# The C++ types bindings/manual.cpp binds, spelled as OCCT's headers spell them.
+# The generator treats a signature naming one of these as bound, instead of
+# skipping the member as unbound. One spelling per line, spaces ignored.
+NCollection_List<TopoDS_Shape>
+NCollection_List<BRepOffset_Interval>
+NCollection_Array1<gp_Pnt>
+NCollection_Array1<double>
+NCollection_Array1<int>
+BRepLProp_SLProps
