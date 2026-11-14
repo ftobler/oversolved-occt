@@ -2,3 +2,4 @@ feature/
 scratch/
 tmp/
 __pycache__/
+.vscode/
