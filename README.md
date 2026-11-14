@@ -71,8 +71,11 @@ bound by hand in [`bindings/manual.cpp`](bindings/manual.cpp).
 
 ## Release
 
-CI builds every push. A tag `occt-<occt version>-r<n>`, for example
-`occt-8.0.1-r1`, also publishes everything in `tmp/dist` as a GitHub release. `n` counts builds of the same OCCT version: bump it for a
+CI builds and smoke-tests every push to `main` or `dev` and every pull request.
+Only `main` releases. A tag `occt-<occt version>-r<n>`, for example
+`occt-8.0.1-r1`, on a commit that is on `main` publishes everything in
+`tmp/dist` as a GitHub release of that name; a tag elsewhere fails the release
+step. `n` counts builds of the same OCCT version: bump it for a
 binding or flag change, and reset it to 1 on a re-pin.
 
 ## Re-pinning (chore)
