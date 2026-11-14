@@ -49,6 +49,13 @@ jobs:
       - name: Install just and ninja
         run: sudo apt-get update && sudo apt-get install -y just ninja-build
 
+      # The runner image's own Node is whatever it ships that month. The build
+      # job's smoke test runs on the one Node we develop on; the smoke job below
+      # then runs the finished artifact on every Node the consumer supports.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
       # The keys hold exactly what each cache depends on: the emsdk version for
       # the toolchain, and for OCCT the source pin, the emsdk version, the flag
       # variables and the text of the occt recipe. A bindings or link change
@@ -102,9 +109,29 @@ jobs:
           path: tmp/dist
           if-no-files-found: error
 
+  # The artifact is built once; its consumer, Oversolved, tests on these Node
+  # lines too, so the same smoke test runs on each against the uploaded files.
+  smoke:
+    needs: build
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [22, 24, 26]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: occt
+          path: tmp/dist
+      - run: node scripts/smoke.mjs tmp/dist
+
   # Write access is held by this job alone, and only a tag run reaches it.
   release:
-    needs: build
+    needs: [build, smoke]
     if: startsWith(github.ref, 'refs/tags/occt-')
     runs-on: ubuntu-24.04
     permissions:
