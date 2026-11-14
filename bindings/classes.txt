@@ -1,0 +1,134 @@
+# The OCCT surface Oversolved binds. One class or enum per line; public
+# ancestors of a listed class are bound too, so list only what the kernel names.
+# `Handle_X` binds opencascade::handle<X>. NCollection containers are template
+# instantiations and are bound by hand in manual.cpp, not here.
+
+# ─── geometry primitives ───
+gp_Ax1
+gp_Ax2
+gp_Ax3
+gp_Circ
+gp_Cone
+gp_Cylinder
+gp_Dir
+gp_Dir2d
+gp_Elips
+gp_Lin
+gp_Pnt
+gp_Pnt2d
+gp_Sphere
+gp_Torus
+gp_Trsf
+gp_Vec
+
+# ─── curves and surfaces ───
+GC_MakeArcOfCircle
+GC_MakeArcOfEllipse
+Geom2d_Line
+Geom_BSplineCurve
+Geom_BezierCurve
+Geom_CylindricalSurface
+Geom_Ellipse
+Geom_TrimmedCurve
+Handle_Geom2d_Curve
+Handle_Geom_BSplineCurve
+Handle_Geom_Curve
+Handle_Geom_Surface
+Handle_Geom_TrimmedCurve
+
+# ─── topology ───
+TopoDS
+TopoDS_Compound
+TopoDS_Edge
+TopoDS_Face
+TopoDS_Shape
+TopoDS_Shell
+TopoDS_Solid
+TopoDS_Vertex
+TopoDS_Wire
+TopExp_Explorer
+TopLoc_Location
+BRep_Builder
+BRep_Tool
+BRepTools
+BRepTools_History
+BRepTools_ReShape
+BRepTools_WireExplorer
+Handle_BRepTools_History
+Poly_Triangulation
+
+# ─── construction ───
+BRepBuilderAPI_Copy
+BRepBuilderAPI_MakeEdge
+BRepBuilderAPI_MakeFace
+BRepBuilderAPI_MakePolygon
+BRepBuilderAPI_MakeVertex
+BRepBuilderAPI_MakeWire
+BRepBuilderAPI_Transform
+BRepPrimAPI_MakeBox
+BRepPrimAPI_MakeCone
+BRepPrimAPI_MakeCylinder
+BRepPrimAPI_MakePrism
+BRepPrimAPI_MakeRevol
+BRepPrimAPI_MakeSphere
+BRepPrimAPI_MakeTorus
+BRepPrim_Cylinder
+LocOpe_DPrism
+
+# ─── modeling algorithms ───
+BRepAlgoAPI_Common
+BRepAlgoAPI_Cut
+BRepAlgoAPI_Defeaturing
+BRepAlgoAPI_Fuse
+BRepAlgoAPI_Splitter
+BRepFilletAPI_MakeChamfer
+BRepFilletAPI_MakeFillet
+BRepOffsetAPI_MakeOffset
+BRepOffsetAPI_MakeOffsetShape
+BRepOffsetAPI_MakePipeShell
+BRepOffsetAPI_MakeThickSolid
+BRepOffsetAPI_ThruSections
+BRepOffset_Analyse
+BRepOffset_Interval
+BRepLib
+ShapeFix_Face
+ShapeFix_Shape
+ShapeFix_Wire
+ShapeUpgrade_UnifySameDomain
+
+# ─── queries ───
+BRepAdaptor_Curve
+BRepAdaptor_Curve2d
+BRepAdaptor_Surface
+BRepBndLib
+Bnd_Box
+BRepCheck_Analyzer
+BRepClass3d_SolidClassifier
+BRepClass_FaceClassifier
+BRepExtrema_DistShapeShape
+BRepGProp
+GProp_GProps
+BRepMesh_IncrementalMesh
+IntCurvesFace_ShapeIntersector
+Message_ProgressRange
+
+# ─── data exchange ───
+STEPControl_Reader
+STEPControl_Writer
+StlAPI_Writer
+
+# ─── enums ───
+BRepBuilderAPI_TransitionMode
+BRepOffset_Mode
+ChFi3d_FilletShape
+ChFiDS_TypeOfConcavity
+Extrema_ExtFlag
+GeomAbs_CurveType
+GeomAbs_JoinType
+GeomAbs_Shape
+GeomAbs_SurfaceType
+IFSelect_ReturnStatus
+STEPControl_StepModelType
+TopAbs_Orientation
+TopAbs_ShapeEnum
+TopAbs_State

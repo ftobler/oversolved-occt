@@ -1,0 +1,56 @@
+# Build the artifact on every push and pull request; a tag `occt-<version>-r<n>`
+# also publishes it as a GitHub release. The steps are the justfile recipes, so
+# CI and a local build cannot drift apart.
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['occt-*']
+  pull_request:
+
+permissions:
+  contents: write  # only the release step writes, and only on a tag
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install just and ninja
+        run: sudo apt-get update && sudo apt-get install -y just ninja-build
+
+      # The toolchain and the OCCT libraries are the slow parts. Their keys
+      # cover everything they depend on: the emsdk pin, the source pin and the
+      # build flags, all of which live in the justfile and occt.pin.json.
+      - uses: actions/cache@v4
+        with:
+          path: tmp/emsdk
+          key: emsdk-${{ hashFiles('justfile') }}
+      - uses: actions/cache@v4
+        with:
+          path: tmp/build/occt/install
+          key: occt-${{ hashFiles('occt.pin.json', 'justfile') }}
+
+      - run: just toolchain
+      - run: just fetch
+      - name: just occt (skipped on a cache hit)
+        run: '[ -d tmp/build/occt/install/lib ] || just occt'
+      - run: just bindings
+      - run: just link
+      - run: just smoke
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: occt
+          path: tmp/dist
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/occt-')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "$GITHUB_REF_NAME" tmp/dist/*
+          --title "$GITHUB_REF_NAME" --notes-file tmp/dist/manifest.json
