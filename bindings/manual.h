@@ -26,7 +26,8 @@ int ShapeHashCode(const TopoDS_Shape& theShape, int theUpperBound);
 std::optional<TopoDS_Shape> BinderShape(const Transfer_Binder& theBinder);
 
 // StepData_StepModel::IdentLabel, reached through the base model the reader
-// hands back: the entity's `#N` label, 0 when it has none.
+// hands back: the entity's `#N` label, or 0 when the model is not a STEP model
+// or the entity has no label.
 int ModelIdentLabel(const Interface_InterfaceModel& theModel,
                     const opencascade::handle<Standard_Transient>& theEntity);
 

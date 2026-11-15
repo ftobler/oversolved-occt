@@ -112,8 +112,8 @@ int ModelIdentLabel(const Interface_InterfaceModel& theModel,
 
 EMSCRIPTEN_BINDINGS(occt_manual)
 {
-  // Transfer_Binder::Result returns std::optional<TopoDS_Shape>: undefined for
-  // a binder of another kind, an owned shape copy for a shape binder.
+  // Result is bound as std::optional<TopoDS_Shape>: undefined for a binder of
+  // another kind, an owned shape copy for a shape binder.
   register_optional<TopoDS_Shape>();
   class_<BRepLProp_SLProps>("BRepLProp_SLProps")
     .function("IsNormalDefined", optional_override([](BRepLProp_SLProps& self) { return self.IsNormalDefined(); }))

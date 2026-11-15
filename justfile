@@ -104,10 +104,11 @@ bindings:
 
 # Emscripten's default stack is 64 KB, which deep modeling calls overflow: a
 # fillet over two fused cylinders overruns it, and a wasm stack overflow traps
-# as "memory access out of bounds" instead of raising. 5 MB leaves room for the
-# deepest OCCT path; -I bindings makes manual.h visible to the generated file.
+# as "memory access out of bounds" instead of raising. Smoke reads the size back
+# from the exported stack bounds, so dropping this line fails the test.
 
 # Compile the bindings and link them with the OCCT libraries into tmp/dist.
+# -I bindings makes manual.h visible to the generated file.
 link:
     rm -rf {{dist}}
     mkdir -p {{dist}}
@@ -116,6 +117,7 @@ link:
         -Wl,--start-group {{occt_install}}/lib/*.a -Wl,--end-group \
         -lembind \
         -sSTACK_SIZE=5MB \
+        -sEXPORTED_FUNCTIONS=_emscripten_stack_get_base,_emscripten_stack_get_end \
         -sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=occt \
         -sENVIRONMENT=web,worker,node \
         -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=4GB \

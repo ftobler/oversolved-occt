@@ -7,7 +7,8 @@ says how to work on it.
 ## Layout
 - `occt.pin.json` - the upstream source: release, tag, commit, archive, sha256
 - `bindings/classes.txt` - the OCCT classes and enums to bind
-- `bindings/manual.cpp` - hand bindings for template instantiations
+- `bindings/manual.cpp` - hand bindings for template instantiations and for members the AST cannot supply
+- `bindings/manual.h` - declarations for the members manual.cpp adds to generated classes
 - `bindings/manual.txt` - the C++ spellings manual.cpp binds, so the generator counts them as bound
 - `bindings/skip.txt` - optional; members to drop, by JS name, each with a `# reason`
 - `scripts/pin.py` - fetch and verify the pinned source, or re-pin
@@ -37,7 +38,10 @@ version) rebuilds OCCT, in CI too: its cache key covers exactly those inputs.
 - Only main releases, by tag `occt-<pinned version>-r<n>`. Do not weaken the tag
   checks in the workflow.
 - Generated files (`tmp/build/bindings.cpp`) are never edited. Fix the
-  generator, `classes.txt` or `manual.cpp`.
+  generator, `classes.txt`, `manual.cpp` or `manual.h`.
+- A member the AST cannot supply is written by hand: declared in `manual.h`,
+  defined in `manual.cpp` and listed in `MANUAL_MEMBERS`, all three. Embind
+  allows one registration per class, so it cannot be a separate block.
 - Prefer a generator rule over a `skip.txt` line; `skip.txt` is for one-off
   members, with a `# reason` on the line. A line that matches nothing fails.
 - Everything generated lives in `tmp/` (gitignored). No system-wide `/tmp`.

@@ -329,7 +329,7 @@ def bind_method(rec: str, fn: Fn) -> str:
         body = f"return {fn.delegate}({', '.join(passed)});"
         kind = "class_function" if fn.static else "function"
         return (f"    .{kind}(\"{fn.js}\", optional_override([]({', '.join(args)}) -> {ret} "
-                f"{{ {body} }}))")
+                f"{{ {body} }}), allow_raw_pointers())")
     target = f"{rec}::{fn.name}" if fn.static else f"self.{fn.name}"
     ret = "std::string" if C_STRING.match(fn.ret) else fn.ret
     body = f"{target}({', '.join(call)})"
@@ -372,6 +372,8 @@ def emit_record(rec: Record, b: Binder) -> tuple[list[str], str]:
     for fn in rec.methods:
         if b.usable(f"{rec.name}::{fn.js}", fn):
             lines.append(bind_method(rec.name, fn))
+    # A manual member is not filtered: manual.cpp owns its signature, so no
+    # type in it can be unbound, and skip.txt does not apply to it.
     for fn in MANUAL_MEMBERS.get(rec.name, []):
         b.accept(fn)
         lines.append(bind_method(rec.name, fn))
@@ -463,8 +465,15 @@ def main() -> None:
     skip = set(read_list(SKIP))
     manual = {t.replace(" ", "") for t in read_list(MANUAL)}
     if stale := sorted(set(MANUAL_MEMBERS) - set(records)):
-        raise SystemExit("bindgen.py manual members name classes classes.txt does not list: "
+        raise SystemExit("bindgen.py manual members name classes that classes.txt does not list: "
                          + ", ".join(stale))
+    for name, members in MANUAL_MEMBERS.items():
+        if records[name].tag or records[name].hidden_dtor:
+            raise SystemExit(f"bindgen.py manual member on {name}: a namespace or a protected "
+                             "destructor cannot carry a member")
+        if clash := sorted({fn.name for fn in members} & {fn.name for fn in records[name].methods}):
+            raise SystemExit(f"bindgen.py manual members clash with declared {name} members: "
+                             + ", ".join(clash))
     binder = Binder(opts.include, records, enums, manual, skip)
     binder.handles.update(explicit_handles)
 

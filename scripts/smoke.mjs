@@ -15,6 +15,12 @@ const dist = path.resolve(process.argv[2] ?? 'tmp/dist')
 const { default: occt } = await import(pathToFileURL(path.join(dist, 'occt.js')).href)
 const oc = await occt()
 
+// The link's -sSTACK_SIZE is the r2 fix for deep modeling calls (see justfile);
+// read it back from the module, so dropping the flag cannot stay green.
+const stackBytes = oc._emscripten_stack_get_base() - oc._emscripten_stack_get_end()
+assert.equal(stackBytes, 5 * 1024 * 1024, `stack is 5 MB (found ${stackBytes})`)
+console.log(`stack: ${stackBytes / 1024 / 1024} MB`)
+
 function volume(shape) {
   const props = new oc.GProp_GProps_1()
   oc.BRepGProp.VolumeProperties_1(shape, props, false, false, false)
@@ -35,23 +41,66 @@ console.log(`boolean: volume ${volume(cut.Shape()).toFixed(6)} as expected`)
 
 // The identity hash the kernel buckets sub-shapes by: a stable, bounded int.
 // OCCT 7.8 dropped the member, so the binding is hand-written (manual.cpp).
+// It follows IsSame: orientation is ignored, the location is not.
 const SHAPE_HASH_UPPER = 2147483647
-const hash = cut.Shape().HashCode(SHAPE_HASH_UPPER)
+const cutShape = cut.Shape()
+const hash = cutShape.HashCode(SHAPE_HASH_UPPER)
 assert.ok(Number.isInteger(hash) && hash >= 1 && hash <= SHAPE_HASH_UPPER,
   `TopoDS_Shape.HashCode in [1, ${SHAPE_HASH_UPPER}]: ${hash}`)
-assert.equal(cut.Shape().HashCode(SHAPE_HASH_UPPER), hash, 'HashCode is stable')
-console.log(`hash: ${hash} in [1, ${SHAPE_HASH_UPPER}]`)
+assert.equal(cutShape.HashCode(SHAPE_HASH_UPPER), hash, 'HashCode is stable')
+assert.equal(cutShape.Reversed().HashCode(SHAPE_HASH_UPPER), hash, 'HashCode ignores orientation')
+const movedTrsf = new oc.gp_Trsf_1()
+movedTrsf.SetTranslation_1(new oc.gp_Vec_4(1, 2, 3))
+const movedShape = cutShape.Moved(new oc.TopLoc_Location_4(movedTrsf), false)
+assert.ok(!movedShape.IsSame(cutShape), 'the moved shape is not the same')
+assert.notEqual(movedShape.HashCode(SHAPE_HASH_UPPER), hash, 'HashCode folds in the location')
+console.log(`hash: ${hash} in [1, ${SHAPE_HASH_UPPER}], stable, orientation-free, location-aware`)
 
-// The rest of the surface this release adds: a face pcurve's gp_Circ2d, and
-// ShapeFix_Shape's substitution context (a ShapeBuild_ReShape).
-assert.equal(typeof oc.gp_Circ2d_1, 'function', 'gp_Circ2d is bound')
-assert.equal(typeof oc.BRepAdaptor_Curve2d.prototype.Circle, 'function', 'a pcurve exposes Circle')
-const fix = new oc.ShapeFix_Shape_2(cut.Shape())
+// A circular face pcurve hands back a gp_Circ2d: the cut's planar caps carry
+// the radius 2 circle of the cylindrical face.
+let pcurveCircle = null
+const faceWalk = new oc.TopExp_Explorer_2(cutShape, oc.TopAbs_ShapeEnum.TopAbs_FACE,
+  oc.TopAbs_ShapeEnum.TopAbs_SHAPE)
+for (; faceWalk.More() && pcurveCircle === null; faceWalk.Next()) {
+  const face = oc.TopoDS.Face_1(faceWalk.Current())
+  const edgeWalk = new oc.TopExp_Explorer_2(face, oc.TopAbs_ShapeEnum.TopAbs_EDGE,
+    oc.TopAbs_ShapeEnum.TopAbs_SHAPE)
+  for (; edgeWalk.More() && pcurveCircle === null; edgeWalk.Next()) {
+    const pcurve = new oc.BRepAdaptor_Curve2d_2(oc.TopoDS.Edge_1(edgeWalk.Current()), face)
+    if (pcurve.GetType() === oc.GeomAbs_CurveType.GeomAbs_Circle) pcurveCircle = pcurve.Circle()
+    pcurve.delete()
+  }
+}
+assert.ok(pcurveCircle !== null, 'a circular face pcurve yields gp_Circ2d')
+const pcurveRadius = pcurveCircle.Radius()
+assert.ok(Math.abs(pcurveRadius - 2) < 1e-9, `pcurve radius ${pcurveRadius}`)
+pcurveCircle.delete()
+
+// ShapeFix_Shape's substitution context is a ShapeBuild_ReShape.
+const fix = new oc.ShapeFix_Shape_2(cutShape)
 const context = fix.Context()
 assert.ok(!context.IsNull(), 'ShapeFix_Shape.Context() is a ShapeBuild_ReShape')
 context.delete()
 fix.delete()
-console.log('surface: gp_Circ2d and ShapeFix_Shape.Context() are present')
+console.log(`surface: gp_Circ2d radius ${pcurveRadius}, ShapeFix_Shape.Context() present`)
+
+// Two fused cylinders with every edge filleted: the operation whose call chain
+// needed the 5 MB stack rather than the 64 KB default.
+const crossingAxis = new oc.gp_Ax2_4(new oc.gp_Pnt_3(0, 0, 10), new oc.gp_Dir_5(1, 0, 0))
+const crossing = new oc.BRepPrimAPI_MakeCylinder_3(crossingAxis, 3, 30)
+const fused = new oc.BRepAlgoAPI_Fuse_3(cylinder.Shape(), crossing.Shape(), progress).Shape()
+const fillet = new oc.BRepFilletAPI_MakeFillet(fused, oc.ChFi3d_FilletShape.ChFi3d_Rational)
+const filletEdges = new oc.TopExp_Explorer_2(fused, oc.TopAbs_ShapeEnum.TopAbs_EDGE,
+  oc.TopAbs_ShapeEnum.TopAbs_SHAPE)
+let filletEdgeCount = 0
+for (; filletEdges.More(); filletEdges.Next()) {
+  fillet.Add_2(0.5, oc.TopoDS.Edge_1(filletEdges.Current()))
+  filletEdgeCount++
+}
+fillet.Build(progress)
+assert.ok(fillet.IsDone(), 'fillet over two fused cylinders')
+assert.ok(volume(fillet.Shape()) > 0, 'the fillet result has volume')
+console.log(`fillet: ${filletEdgeCount} edges over two fused cylinders`)
 
 // STEP out and back in through MEMFS keeps the solid.
 const writer = new oc.STEPControl_Writer_1()
@@ -74,15 +123,18 @@ const processHandle = readerHandle.get().TransientProcess()
 const model = modelHandle.get()
 const transferMap = processHandle.get()
 const entityIds = []
+let entries = 0
 try {
-  for (let i = 1; i <= transferMap.NbMapped(); i++) {
+  entries = transferMap.NbMapped()
+  for (let i = 1; i <= entries; i++) {
     const binderHandle = transferMap.MapItem(i)
     if (binderHandle.IsNull()) {
       binderHandle.delete()
       continue
     }
-    const result = binderHandle.get().Result?.()
-    if (!result?.ShapeType) {
+    const binder = binderHandle.get()
+    const result = binder.Result()
+    if (result === undefined) {
       binderHandle.delete()
       continue
     }
@@ -108,7 +160,7 @@ for (; faceExp.More(); faceExp.Next()) faceCount++
 assert.equal(entityIds.length, faceCount, 'every read face has a STEP entity id')
 assert.equal(new Set(entityIds).size, entityIds.length, 'STEP entity ids are distinct')
 assert.ok(entityIds.every((id) => id > 0), 'STEP entity ids are the file\'s #N')
-console.log(`transfer map: ${faceCount} faces, ${transferMap.NbMapped()} entries, ids ${entityIds.join(',')}`)
+console.log(`transfer map: ${faceCount} faces, ${entries} entries, ids ${entityIds.join(',')}`)
 
 // A degenerate edge throws StdFail_NotDone in C++; it must surface in JS as an
 // exception the consumer can name.
