@@ -1,4 +1,5 @@
-// Hand-written bindings for the template instantiations the kernel uses.
+// Hand-written bindings for the template instantiations the kernel uses, and
+// for the members registered on a generated class (see manual.h).
 //
 // The generator walks plain classes only. The JS names keep the classic
 // TColgp/TColStd/TopTools aliases (OCCT 8 moved those typedefs to Deprecated/)
@@ -12,8 +13,15 @@
 #include <BRepOffset_Interval.hxx>
 #include <NCollection_Array1.hxx>
 #include <NCollection_List.hxx>
+#include <StepData_StepModel.hxx>
 #include <TopoDS_Shape.hxx>
+#include <Transfer_Binder.hxx>
+#include <TransferBRep_BinderOfShape.hxx>
 #include <gp_Pnt.hxx>
+
+#include <functional>
+
+#include "manual.h"
 
 using namespace emscripten;
 
@@ -69,8 +77,44 @@ struct SLProps : BRepLProp_SLProps
 
 } // namespace
 
+namespace occt_manual
+{
+
+// The 7.7 contract: TShape and location, orientation ignored, in [1, upper].
+int ShapeHashCode(const TopoDS_Shape& theShape, int theUpperBound)
+{
+  const std::size_t aBound = theUpperBound > 0 ? static_cast<std::size_t>(theUpperBound) : 1;
+  return static_cast<int>(std::hash<TopoDS_Shape>{}(theShape) % aBound) + 1;
+}
+
+std::optional<TopoDS_Shape> BinderShape(const Transfer_Binder& theBinder)
+{
+  // MapItem hands every binder back as Transfer_Binder; only a shape binder
+  // has a result the kernel can read.
+  const auto* aShapeBinder = dynamic_cast<const TransferBRep_BinderOfShape*>(&theBinder);
+  if (aShapeBinder == nullptr)
+  {
+    return {};
+  }
+  return aShapeBinder->Result();
+}
+
+int ModelIdentLabel(const Interface_InterfaceModel& theModel,
+                    const opencascade::handle<Standard_Transient>& theEntity)
+{
+  // The reader knows the model as Interface_InterfaceModel; STEP labels live
+  // on StepData_StepModel.
+  const auto* aStepModel = dynamic_cast<const StepData_StepModel*>(&theModel);
+  return aStepModel == nullptr ? 0 : aStepModel->IdentLabel(theEntity);
+}
+
+} // namespace occt_manual
+
 EMSCRIPTEN_BINDINGS(occt_manual)
 {
+  // Transfer_Binder::Result returns std::optional<TopoDS_Shape>: undefined for
+  // a binder of another kind, an owned shape copy for a shape binder.
+  register_optional<TopoDS_Shape>();
   class_<BRepLProp_SLProps>("BRepLProp_SLProps")
     .function("IsNormalDefined", optional_override([](BRepLProp_SLProps& self) { return self.IsNormalDefined(); }))
     .function("Normal", optional_override([](BRepLProp_SLProps& self) { return self.Normal(); }));

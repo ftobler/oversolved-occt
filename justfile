@@ -102,14 +102,20 @@ bindings:
 # the consumer getExceptionMessage(e) -> [type, what()] to name it, and
 # decrementExceptionRefcount(e) to free it once handled.
 
+# Emscripten's default stack is 64 KB, which deep modeling calls overflow: a
+# fillet over two fused cylinders overruns it, and a wasm stack overflow traps
+# as "memory access out of bounds" instead of raising. 5 MB leaves room for the
+# deepest OCCT path; -I bindings makes manual.h visible to the generated file.
+
 # Compile the bindings and link them with the OCCT libraries into tmp/dist.
 link:
     rm -rf {{dist}}
     mkdir -p {{dist}}
-    {{em}} em++ {{cxxflags}} -std=c++17 -I{{occt_inc}} \
+    {{em}} em++ {{cxxflags}} -std=c++17 -I{{occt_inc}} -I{{root}}/bindings \
         tmp/build/bindings.cpp bindings/manual.cpp \
         -Wl,--start-group {{occt_install}}/lib/*.a -Wl,--end-group \
         -lembind \
+        -sSTACK_SIZE=5MB \
         -sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=occt \
         -sENVIRONMENT=web,worker,node \
         -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=4GB \

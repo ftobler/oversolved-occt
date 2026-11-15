@@ -1,9 +1,9 @@
 // Load the built module in node and drive the paths Oversolved depends on:
 // construction, a boolean, mass properties, a STEP round trip through the
-// in-memory FS, a C++ exception crossing into JS, and a probe that no
-// registered member names an unbound type. A green run means the artifact
-// links, instantiates and computes, not that every binding is right; that is
-// the consumer's test suite's job.
+// in-memory FS with the transfer map's per-face ids, a C++ exception crossing
+// into JS, and a probe that no registered member names an unbound type. A green
+// run means the artifact links, instantiates and computes, not that every
+// binding is right; that is the consumer's test suite's job.
 //
 // Usage: node scripts/smoke.mjs <dist dir>
 
@@ -33,6 +33,26 @@ const expected = 10 * 20 * 30 - (Math.PI * 2 * 2 * 30) / 4
 assert.ok(Math.abs(volume(cut.Shape()) - expected) < 1e-6, 'box minus cylinder volume')
 console.log(`boolean: volume ${volume(cut.Shape()).toFixed(6)} as expected`)
 
+// The identity hash the kernel buckets sub-shapes by: a stable, bounded int.
+// OCCT 7.8 dropped the member, so the binding is hand-written (manual.cpp).
+const SHAPE_HASH_UPPER = 2147483647
+const hash = cut.Shape().HashCode(SHAPE_HASH_UPPER)
+assert.ok(Number.isInteger(hash) && hash >= 1 && hash <= SHAPE_HASH_UPPER,
+  `TopoDS_Shape.HashCode in [1, ${SHAPE_HASH_UPPER}]: ${hash}`)
+assert.equal(cut.Shape().HashCode(SHAPE_HASH_UPPER), hash, 'HashCode is stable')
+console.log(`hash: ${hash} in [1, ${SHAPE_HASH_UPPER}]`)
+
+// The rest of the surface this release adds: a face pcurve's gp_Circ2d, and
+// ShapeFix_Shape's substitution context (a ShapeBuild_ReShape).
+assert.equal(typeof oc.gp_Circ2d_1, 'function', 'gp_Circ2d is bound')
+assert.equal(typeof oc.BRepAdaptor_Curve2d.prototype.Circle, 'function', 'a pcurve exposes Circle')
+const fix = new oc.ShapeFix_Shape_2(cut.Shape())
+const context = fix.Context()
+assert.ok(!context.IsNull(), 'ShapeFix_Shape.Context() is a ShapeBuild_ReShape')
+context.delete()
+fix.delete()
+console.log('surface: gp_Circ2d and ShapeFix_Shape.Context() are present')
+
 // STEP out and back in through MEMFS keeps the solid.
 const writer = new oc.STEPControl_Writer_1()
 writer.Transfer_1(cut.Shape(), oc.STEPControl_StepModelType.STEPControl_AsIs, true, progress)
@@ -40,8 +60,55 @@ assert.equal(writer.Write('/smoke.step'), oc.IFSelect_ReturnStatus.IFSelect_RetD
 const reader = new oc.STEPControl_Reader_1()
 assert.equal(reader.ReadFile_1('/smoke.step'), oc.IFSelect_ReturnStatus.IFSelect_RetDone, 'STEP read')
 reader.TransferRoots(progress)
-assert.ok(Math.abs(volume(reader.OneShape()) - expected) < 1e-3, 'STEP round trip volume')
+const readShape = reader.OneShape()
+assert.ok(Math.abs(volume(readShape) - expected) < 1e-3, 'STEP round trip volume')
 console.log(`step: ${oc.FS.readFile('/smoke.step').length} bytes, round trip keeps the volume`)
+
+// Every face the read produced has the `#N` it was written as. The transfer
+// map hands the model and the binders back as their base classes; Result() and
+// IdentLabel() are the hand-written widenings that read them.
+const wsHandle = reader.WS()
+const modelHandle = reader.Model()
+const readerHandle = wsHandle.get().TransferReader()
+const processHandle = readerHandle.get().TransientProcess()
+const model = modelHandle.get()
+const transferMap = processHandle.get()
+const entityIds = []
+try {
+  for (let i = 1; i <= transferMap.NbMapped(); i++) {
+    const binderHandle = transferMap.MapItem(i)
+    if (binderHandle.IsNull()) {
+      binderHandle.delete()
+      continue
+    }
+    const result = binderHandle.get().Result?.()
+    if (!result?.ShapeType) {
+      binderHandle.delete()
+      continue
+    }
+    if (result.ShapeType() === oc.TopAbs_ShapeEnum.TopAbs_FACE) {
+      const entity = transferMap.Mapped(i)
+      if (!entity.IsNull()) entityIds.push(model.IdentLabel(entity))
+      entity.delete()
+    }
+    result.delete()
+    binderHandle.delete()
+  }
+} finally {
+  // `get()` returns a borrowed view of the handle's object: never delete those.
+  processHandle.delete()
+  readerHandle.delete()
+  modelHandle.delete()
+  wsHandle.delete()
+}
+const faceExp = new oc.TopExp_Explorer_2(readShape, oc.TopAbs_ShapeEnum.TopAbs_FACE,
+  oc.TopAbs_ShapeEnum.TopAbs_SHAPE)
+let faceCount = 0
+for (; faceExp.More(); faceExp.Next()) faceCount++
+assert.equal(entityIds.length, faceCount, 'every read face has a STEP entity id')
+assert.equal(new Set(entityIds).size, entityIds.length, 'STEP entity ids are distinct')
+assert.ok(entityIds.every((id) => id > 0), 'STEP entity ids are the file\'s #N')
+console.log(`transfer map: ${faceCount} faces, ${transferMap.NbMapped()} entries, ids ${entityIds.join(',')}`)
 
 // A degenerate edge throws StdFail_NotDone in C++; it must surface in JS as an
 // exception the consumer can name.

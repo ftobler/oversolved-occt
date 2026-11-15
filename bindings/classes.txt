@@ -8,6 +8,7 @@ gp_Ax1
 gp_Ax2
 gp_Ax3
 gp_Circ
+gp_Circ2d
 gp_Cone
 gp_Cylinder
 gp_Dir
@@ -95,6 +96,7 @@ BRepOffsetAPI_ThruSections
 BRepOffset_Analyse
 BRepOffset_Interval
 BRepLib
+ShapeBuild_ReShape
 ShapeFix_Face
 ShapeFix_Shape
 ShapeFix_Wire
@@ -120,6 +122,19 @@ Message_ProgressRange
 STEPControl_Reader
 STEPControl_Writer
 StlAPI_Writer
+
+# The STEP transfer map: after TransferRoots, it pairs each result shape with
+# the `#N` entity the file wrote it as. The reader hands the model and the
+# binders back through their base classes; manual.cpp reaches the members the
+# kernel calls on them (IdentLabel, Result). Its entities cross as handles to
+# Standard_Transient, which is already bound as a public ancestor.
+Interface_InterfaceModel
+StepData_StepModel
+Transfer_Binder
+TransferBRep_BinderOfShape
+Transfer_TransientProcess
+XSControl_TransferReader
+XSControl_WorkSession
 
 # ─── enums ───
 BRepBuilderAPI_TransitionMode

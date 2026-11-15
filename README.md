@@ -52,10 +52,19 @@ left out.
 - `manifest.json`: the pin, the `emcc` version that built it, this repo's build commit and the sha256 of each file
 
 `just smoke` runs a boolean, a STEP round trip through the in-memory
-filesystem, and a C++ exception crossing into JS. It also calls every
-registered member with no arguments: a member whose signature names an unbound
-type throws "unbound types" at that call, before any argument check, so the
-test fails by name instead of leaving the problem for the first caller.
+filesystem, the STEP transfer map's per-face ids, and a C++ exception crossing
+into JS. It also calls every registered member with no arguments: a member
+whose signature names an unbound type throws "unbound types" at that call,
+before any argument check, so the test fails by name instead of leaving the
+problem for the first caller.
+
+### Stack
+
+The link sets `-sSTACK_SIZE=5MB`. Emscripten's default is 64 KB, which deep
+modeling calls overflow: a fillet over two fused cylinders overruns it, and a
+wasm stack overflow traps as "memory access out of bounds" rather than raising
+something the caller can catch. The stack comes out of the module's initial
+memory; `ALLOW_MEMORY_GROWTH` covers the heap beyond it.
 
 ### Exceptions
 
@@ -104,6 +113,17 @@ containers, `BRepLProp_SLProps`) are bound by hand in
 [`bindings/manual.cpp`](bindings/manual.cpp), and
 [`bindings/manual.txt`](bindings/manual.txt) lists the spellings it covers so
 the generator counts them as bound.
+
+A few members cannot come from the AST at all: OCCT 8 no longer declares
+`TopoDS_Shape::HashCode` (7.8 replaced it with `std::hash`), and the STEP
+transfer map and its model are handed back as their base classes, so the JS
+base type lacks the subclass members the kernel reads
+(`TransferBRep_BinderOfShape::Result`, `StepData_StepModel::IdentLabel`).
+Embind allows one registration per class, so those are implemented in
+`manual.cpp` and declared in [`bindings/manual.h`](bindings/manual.h);
+`MANUAL_MEMBERS` in `scripts/bindgen.py` registers each on the generated class.
+`HashCode` keeps the 7.7 contract: a value in `[1, upperBound]` computed from
+the TShape and the location.
 
 ## Release
 
