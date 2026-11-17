@@ -41,8 +41,11 @@ just clean   # drop tmp/
 `just occt` is the long step, tens of minutes even on a fast many-core machine.
 A change to the bindings only needs `just bindings link smoke`. The build
 covers the FoundationClasses, ModelingData and ModelingAlgorithms modules plus
-the STEP and STL toolkits and what they depend on. Draw, the viewer and OCAF are
-left out.
+the STEP and STL toolkits and what they depend on. The STEP toolkit depends on
+the OCAF and XCAF document toolkits (`TKLCAF`, `TKCAF`, `TKCDF`, `TKXCAF`,
+`TKVCAF`) and through them on the viewer's core (`TKV3d`, `TKService`), so those
+are built too, without OpenGL, FreeType or Tk. Draw and the rest of the viewer
+are left out.
 
 `tmp/dist` then holds:
 
@@ -52,8 +55,9 @@ left out.
 - `manifest.json`: the pin, the `emcc` version that built it, this repo's build commit and the sha256 of each file
 
 `just smoke` runs a boolean, a fillet over two fused cylinders, a STEP round
-trip through the in-memory filesystem with the transfer map's per-face ids, and
-a C++ exception crossing into JS. It also calls every registered member with no
+trip through the in-memory filesystem with the transfer map's per-face ids, a
+coloured STEP round trip through `OversolvedStepCaf`, and a C++ exception
+crossing into JS. It also calls every registered member with no
 arguments: a member whose signature names an unbound type throws "unbound
 types" at that call, before any argument check, so the test fails by name
 instead of leaving the problem for the first caller.
@@ -126,6 +130,47 @@ Embind allows one registration per class, so those are implemented in
 `MANUAL_MEMBERS` in `scripts/bindgen.py` registers each on the generated class.
 `HashCode` keeps the 7.7 contract: a value in `[1, upperBound]` computed from
 the TShape and the location.
+
+### OversolvedStepCaf
+
+STEP part colours and names come through one hand-written class in
+[`bindings/oversolved_caf.cpp`](bindings/oversolved_caf.cpp) rather than the
+XCAF classes, whose members trade in labels, attribute handles and GUIDs:
+
+```js
+const r = new oc.OversolvedStepCaf()
+r.ReadFile(path)    // IFSelect_ReturnStatus, as STEPCAFControl_Reader::ReadFile
+r.Transfer()        // boolean; reads into a document the object owns
+r.OneShape()        // TopoDS_Shape
+r.Model()           // Handle_Interface_InterfaceModel
+r.WS()              // Handle_XSControl_WorkSession
+r.Colors(shape)     // { faceColor: Int32Array, solidColor: Int32Array }
+r.Names(shape)      // string[]
+r.delete()
+```
+
+`OneShape`, `Model` and `WS` are the inner `STEPControl_Reader`'s after the CAF
+transfer, so the transfer map is walked exactly as with the plain reader. The
+reader reads colours and names only (no layers, properties, GD&T, materials or
+views) and scales to millimetre like the plain reader. `just smoke` proves that
+the face -> `#N` labels read through `OversolvedStepCaf` equal the plain
+`STEPControl_Reader`'s, face for face in explorer order, along with the volume.
+
+`Colors(shape)` takes `OneShape()` or a sub-shape of it and returns, per face in
+`TopExp_Explorer` order, its effective colour, and per solid likewise. A colour
+is `0xRRGGBB` in sRGB (`Quantity_Color::Values` with `Quantity_TOC_sRGB`, each
+channel rounded from 0..1 to 0..255), or -1 for none; `Red()`/`Green()`/`Blue()`
+are linear since OCCT 7.5 and would read a file's `#808080` as about `#373737`.
+Styles come from `XCAFPrs::CollectStyleSettings`, OCCT's own resolution
+including instance and SHUO overrides. On a label the surface colour wins, then
+the generic one, then the curve colour. A face or solid without a colour of its
+own takes the nearest one above it: its shell's, its solid's, its part's, the
+instance's, the assembly's.
+
+`Names(shape)` returns per solid in explorer order the name of its product
+(else of the nearest named owner), as OCCT decodes it, in UTF-8, or `""`.
+`OversolvedStepCaf.WriteColoredForTest` exists for `just smoke` and is not part
+of the API.
 
 ## Release
 

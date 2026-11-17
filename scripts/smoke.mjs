@@ -162,6 +162,145 @@ assert.equal(new Set(entityIds).size, entityIds.length, 'STEP entity ids are dis
 assert.ok(entityIds.every((id) => id > 0), 'STEP entity ids are the file\'s #N')
 console.log(`transfer map: ${faceCount} faces, ${entries} entries, ids ${entityIds.join(',')}`)
 
+// ─── OversolvedStepCaf ───
+
+// The colour-aware read (bindings/oversolved_caf.cpp) must hand back the same
+// shape and transfer map as the plain reader: the kernel names imported faces
+// by their `#N`, so those names may not change when it switches readers.
+
+// Per face in explorer order the `#N` it was read from, through a reader's
+// WS() and Model(), as the kernel walks them.
+function faceLabelsInExplorerOrder(source, shape) {
+  const ws = source.WS()
+  const modelH = source.Model()
+  const trH = ws.get().TransferReader()
+  const tpH = trH.get().TransientProcess()
+  const tp = tpH.get()
+  const pairs = []
+  try {
+    for (let i = 1; i <= tp.NbMapped(); i++) {
+      const binderH = tp.MapItem(i)
+      const result = binderH.IsNull() ? undefined : binderH.get().Result()
+      binderH.delete()
+      if (result === undefined) continue
+      if (result.ShapeType() !== oc.TopAbs_ShapeEnum.TopAbs_FACE) {
+        result.delete()
+        continue
+      }
+      const entity = tp.Mapped(i)
+      pairs.push([result, entity.IsNull() ? 0 : modelH.get().IdentLabel(entity)])
+      entity.delete()
+    }
+    const labels = []
+    const exp = new oc.TopExp_Explorer_2(shape, oc.TopAbs_ShapeEnum.TopAbs_FACE,
+      oc.TopAbs_ShapeEnum.TopAbs_SHAPE)
+    for (; exp.More(); exp.Next()) {
+      const hit = pairs.find(([face]) => face.IsSame(exp.Current()))
+      labels.push(hit ? hit[1] : 0)
+    }
+    exp.delete()
+    return labels
+  } finally {
+    for (const [face] of pairs) face.delete()
+    tpH.delete()
+    trH.delete()
+    modelH.delete()
+    ws.delete()
+  }
+}
+
+function readCaf(file) {
+  const caf = new oc.OversolvedStepCaf()
+  assert.equal(caf.ReadFile(file), oc.IFSelect_ReturnStatus.IFSelect_RetDone, `CAF read ${file}`)
+  assert.ok(caf.Transfer(), `CAF transfer ${file}`)
+  return caf
+}
+
+function countOf(shape, type) {
+  const exp = new oc.TopExp_Explorer_2(shape, type, oc.TopAbs_ShapeEnum.TopAbs_SHAPE)
+  let n = 0
+  for (; exp.More(); exp.Next()) n++
+  exp.delete()
+  return n
+}
+
+const hex = (c) => (c < 0 ? '-1' : `#${c.toString(16).padStart(6, '0')}`)
+
+function facesOf(shape) {
+  const faces = []
+  const exp = new oc.TopExp_Explorer_2(shape, oc.TopAbs_ShapeEnum.TopAbs_FACE, oc.TopAbs_ShapeEnum.TopAbs_SHAPE)
+  for (; exp.More(); exp.Next()) faces.push(exp.Current())
+  exp.delete()
+  return faces
+}
+
+function area(face) {
+  const props = new oc.GProp_GProps_1()
+  oc.BRepGProp.SurfaceProperties_1(face, props, false, false)
+  const mass = props.Mass()
+  props.delete()
+  return mass
+}
+
+// The uncoloured round-trip file: same labels and volume as the plain read,
+// and no colour anywhere.
+{
+  const plainLabels = faceLabelsInExplorerOrder(reader, readShape)
+  const caf = readCaf('/smoke.step')
+  const cafShape = caf.OneShape()
+  assert.equal(cafShape.ShapeType(), readShape.ShapeType(), 'CAF and plain OneShape have the same type')
+  assert.deepEqual(faceLabelsInExplorerOrder(caf, cafShape), plainLabels,
+    'face -> #N through OversolvedStepCaf equals the plain reader, face for face')
+  assert.ok(Math.abs(volume(cafShape) - volume(readShape)) < 1e-9, 'CAF and plain read give the same volume')
+  const { faceColor, solidColor } = caf.Colors(cafShape)
+  assert.ok(faceColor instanceof Int32Array && solidColor instanceof Int32Array, 'colours are Int32Arrays')
+  assert.equal(faceColor.length, plainLabels.length, 'one colour per face')
+  assert.equal(solidColor.length, countOf(cafShape, oc.TopAbs_ShapeEnum.TopAbs_SOLID), 'one colour per solid')
+  assert.ok([...faceColor, ...solidColor].every((c) => c === -1), 'an uncoloured file reports -1 everywhere')
+  cafShape.delete()
+  caf.delete()
+  console.log(`step caf: ${plainLabels.length} face labels equal the plain read, no colours`)
+}
+
+// A coloured file written through XCAF: a mid grey part, so a linear/sRGB
+// mix-up cannot pass (linear would read back as about #373737), and one face
+// in its own colour.
+{
+  const SOLID = 0x808080
+  const FACE = 0x3366cc
+  // A face whose area no other face shares, so the read can be matched to it.
+  const writtenAreas = facesOf(cut.Shape()).map(area)
+  const FACE_INDEX = 1 + writtenAreas.findIndex((a) => writtenAreas.filter((b) => Math.abs(a - b) < 1e-6).length === 1)
+  assert.ok(FACE_INDEX > 0, 'the cut has a face of unique area')
+  assert.ok(oc.OversolvedStepCaf.WriteColoredForTest(cut.Shape(), '/smoke-color.step', SOLID, FACE_INDEX,
+    FACE, 'smoke part'), 'coloured STEP write')
+  const text = new TextDecoder().decode(oc.FS.readFile('/smoke-color.step'))
+  assert.match(text, /COLOUR_RGB\('[^']*',0\.50196/, 'the file carries the grey as sRGB 128/255')
+
+  const caf = readCaf('/smoke-color.step')
+  const shape = caf.OneShape()
+  assert.ok(Math.abs(volume(shape) - expected) < 1e-3, 'coloured round trip keeps the volume')
+  const labels = faceLabelsInExplorerOrder(caf, shape)
+  assert.ok(labels.every((id) => id > 0) && new Set(labels).size === labels.length,
+    'every face of the coloured read has its own #N')
+  const { faceColor, solidColor } = caf.Colors(shape)
+  assert.ok(solidColor.length > 0 && solidColor.every((c) => c === SOLID),
+    `the solid colour comes back as written, sRGB: ${[...solidColor].map(hex)}`)
+  // The read may order faces differently from the write, so the coloured face
+  // is told apart by its area.
+  const areas = facesOf(shape).map(area)
+  const coloured = areas.findIndex((a) => Math.abs(a - writtenAreas[FACE_INDEX - 1]) < 1e-6)
+  assert.ok(coloured >= 0, 'the coloured face is in the read')
+  const wanted = areas.map((_, i) => hex(i === coloured ? FACE : SOLID))
+  assert.deepEqual([...faceColor].map(hex), wanted, 'the coloured face has its colour, the others the solid\'s')
+  assert.deepEqual(caf.Names(shape), [...solidColor].map(() => 'smoke part'), 'the solid carries its part name')
+  shape.delete()
+  caf.delete()
+  console.log(`step caf: solid ${hex(SOLID)}, face ${FACE_INDEX} ${hex(FACE)}, others inherit; names read`)
+}
+
+// ─── end OversolvedStepCaf ───
+
 // A degenerate edge throws StdFail_NotDone in C++; it must surface in JS as an
 // exception the consumer can name.
 const p = new oc.gp_Pnt_3(1, 2, 3)
