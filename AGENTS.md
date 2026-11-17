@@ -11,6 +11,7 @@ says how to work on it.
 - `bindings/manual.h` - declarations for the members manual.cpp adds to generated classes
 - `bindings/manual.txt` - the C++ spellings manual.cpp binds, so the generator counts them as bound
 - `bindings/skip.txt` - optional; members to drop, by JS name, each with a `# reason`
+- `bindings/oversolved_mesh.cpp` - Oversolved's bulk mesh and face facts readers, free-standing classes with their own binding block
 - `scripts/pin.py` - fetch and verify the pinned source, or re-pin
 - `scripts/bindgen.py` - classes.txt + clang JSON AST -> embind source
 - `scripts/manifest.py`, `scripts/smoke.mjs` - describe and check the artifact
