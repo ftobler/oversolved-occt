@@ -8,6 +8,8 @@
 // Usage: node scripts/smoke.mjs <dist dir>
 
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
@@ -177,6 +179,45 @@ const [type, message] = oc.getExceptionMessage(thrown)
 oc.decrementExceptionRefcount(thrown)
 assert.equal(type, 'StdFail_NotDone', 'the exception names its C++ type')
 console.log(`exceptions: ${type} (${message}) surfaces in JS`)
+
+// ─── embind invokers ───
+
+// The link defers embind's per-member invoker construction to the first call
+// (scripts/patch_glue.py). Check the glue carries it, and that an overloaded
+// constructor and a class function work through the deferred path.
+const glue = readFileSync(path.join(dist, 'occt.js'), 'utf8')
+assert.ok(glue.includes('function craftInvokerFunctionNow('), 'occt.js defers embind invokers')
+const invokerPnt = new oc.gp_Pnt_3(1, 2, 3)
+assert.equal(invokerPnt.X(), 1, 'gp_Pnt_3 through its invoker')
+invokerPnt.delete()
+const invokerBox = new oc.BRepPrimAPI_MakeBox_2(1, 1, 1)
+const invokerFaces = new oc.TopExp_Explorer_2(invokerBox.Shape(), oc.TopAbs_ShapeEnum.TopAbs_FACE,
+  oc.TopAbs_ShapeEnum.TopAbs_SHAPE)
+const invokerFace = oc.TopoDS.Face_1(invokerFaces.Current())
+assert.equal(invokerFace.ShapeType(), oc.TopAbs_ShapeEnum.TopAbs_FACE, 'TopoDS.Face_1 on a face')
+invokerFace.delete()
+invokerFaces.delete()
+invokerBox.delete()
+
+// A timing line, not an assert: wall time of `await occt()` (instantiate plus
+// embind registration), median of fresh node processes so no module cache
+// hides it. The import alone is the glue's parse time, which a larger glue
+// pays; both are printed.
+const TIMING_RUNS = 5
+const timingProbe = `
+  const t0 = performance.now()
+  const { default: occt } = await import(${JSON.stringify(pathToFileURL(path.join(dist, 'occt.js')).href)})
+  const t1 = performance.now()
+  await occt()
+  console.log(JSON.stringify([t1 - t0, performance.now() - t1]))`
+const median = (xs) => xs.toSorted((a, b) => a - b)[xs.length >> 1]
+const timings = Array.from({ length: TIMING_RUNS }, () =>
+  JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', timingProbe], { encoding: 'utf8' })))
+console.log(`instantiate: ${median(timings.map(([, run]) => run)).toFixed(0)} ms median of ${TIMING_RUNS}`
+  + ` (import ${median(timings.map(([load]) => load)).toFixed(0)} ms), runs `
+  + timings.map(([, run]) => run.toFixed(0)).join(', '))
+
+// ─── probe ───
 
 // Embind registers a member whose signature names an unbound type, and only
 // throws when it is called. The throw sits at the member's own argument count,

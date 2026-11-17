@@ -76,6 +76,22 @@ as a `WebAssembly.Exception`; `oc.getExceptionMessage(e)` returns
 range and null checks stay compiled in (see `occt_checks` in the justfile), so
 an out-of-range index throws `Standard_OutOfRange` rather than reading garbage.
 
+### Embind invokers
+
+Embind builds a JS invoker for every bound member and constructor with
+`new Function` while the module instantiates, and most are never called. After
+the link, [`scripts/patch_glue.py`](scripts/patch_glue.py) rewrites the glue's
+`craftInvokerFunction` to return a stub that builds the real invoker on its
+first call and keeps it, so argument checks, return values and destructors are
+still embind's own. That takes `await occt()` from about 210 ms to about 120 ms
+(median of 5 fresh node processes on the r2 binding set), for one more
+indirection per call. The patch
+runs before the manifest hashes `occt.js`, and fails the link when the function
+it rewrites is not there exactly once, so an emsdk bump cannot drop it silently;
+`just smoke` checks the glue carries it and prints the instantiate time.
+`-sEMBIND_AOT`, which emits the invokers at link time instead, saved about half
+as much and made `occt.js` half again as large.
+
 ## Bindings
 
 [`bindings/classes.txt`](bindings/classes.txt) lists the OCCT classes and enums
