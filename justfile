@@ -113,7 +113,7 @@ link:
     rm -rf {{dist}}
     mkdir -p {{dist}}
     {{em}} em++ {{cxxflags}} -std=c++17 -I{{occt_inc}} -I{{root}}/bindings \
-        tmp/build/bindings.cpp bindings/manual.cpp bindings/oversolved_mesh.cpp \
+        tmp/build/bindings.cpp bindings/manual.cpp bindings/oversolved_mesh.cpp bindings/oversolved_caf.cpp \
         -Wl,--start-group {{occt_install}}/lib/*.a -Wl,--end-group \
         -lembind \
         -sSTACK_SIZE=5MB \
