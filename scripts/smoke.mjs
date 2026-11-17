@@ -1,7 +1,8 @@
 // Load the built module in node and drive the paths Oversolved depends on:
 // construction, a boolean, mass properties, a STEP round trip through the
 // in-memory FS with the transfer map's per-face ids, a C++ exception crossing
-// into JS, and a probe that no registered member names an unbound type. A green
+// into JS, the bulk mesh and face facts readers against their per-call
+// equivalents, and a probe that no registered member names an unbound type. A green
 // run means the artifact links, instantiates and computes, not that every
 // binding is right; that is the consumer's test suite's job.
 //
@@ -177,6 +178,231 @@ const [type, message] = oc.getExceptionMessage(thrown)
 oc.decrementExceptionRefcount(thrown)
 assert.equal(type, 'StdFail_NotDone', 'the exception names its C++ type')
 console.log(`exceptions: ${type} (${message}) surfaces in JS`)
+
+// ─── bulk mesh and face facts (bindings/oversolved_mesh.cpp) ───
+
+// The bulk readers must return what the consumer's per-call readers return,
+// number for number: these references are those readers, written against the
+// generated bindings the way Oversolved calls them.
+const facesOf = (shape) => {
+  const faces = []
+  const walk = new oc.TopExp_Explorer_2(shape, oc.TopAbs_ShapeEnum.TopAbs_FACE,
+    oc.TopAbs_ShapeEnum.TopAbs_SHAPE)
+  for (; walk.More(); walk.Next()) faces.push(oc.TopoDS.Face_1(walk.Current()))
+  walk.delete()
+  return faces
+}
+const isReversedFace = (face) =>
+  face.Orientation_1().value === oc.TopAbs_Orientation.TopAbs_REVERSED.value
+
+// tessellateFace: nodes moved by the location, 0-based triangles, the winding
+// flipped on a REVERSED face; null when the face has no triangulation.
+function referenceFaceMesh(face) {
+  const loc = new oc.TopLoc_Location_1()
+  const handle = oc.BRep_Tool.Triangulation(face, loc, 0)
+  if (handle.IsNull()) {
+    handle.delete()
+    loc.delete()
+    return null
+  }
+  const poly = handle.get()
+  const trsf = loc.Transformation()
+  const nodes = []
+  for (let i = 1; i <= poly.NbNodes(); i++) {
+    const n = poly.Node(i)
+    n.Transform(trsf)
+    nodes.push(n.X(), n.Y(), n.Z())
+    n.delete()
+  }
+  const reverse = isReversedFace(face)
+  const triangles = []
+  for (let i = 1; i <= poly.NbTriangles(); i++) {
+    const t = poly.Triangle(i)
+    const [a, b, c] = [t.Value(1) - 1, t.Value(2) - 1, t.Value(3) - 1]
+    t.delete()
+    triangles.push(...(reverse ? [a, c, b] : [a, b, c]))
+  }
+  trsf.delete()
+  handle.delete()
+  loc.delete()
+  return { nodes, triangles }
+}
+
+// MeshShape meshes the whole cut once; the move shares that triangulation
+// under a translation, so its faces read back in world coordinates.
+assert.equal(oc.OversolvedMesh.MeshShape(cutShape, 0.1, false, 0.5), true, 'OversolvedMesh.MeshShape')
+let reversedSeen = 0
+let meshNodes = 0
+for (const [shape, moved] of [[cutShape, false], [movedShape, true]]) {
+  const faces = facesOf(shape)
+  const bulk = oc.OversolvedMesh.ShapeTriangulation(shape)
+  assert.equal(bulk.faceCount, faces.length, 'ShapeTriangulation face count')
+  assert.ok(bulk.nodes instanceof Float64Array && bulk.triangles instanceof Int32Array,
+    'ShapeTriangulation arrays are Float64Array and Int32Array')
+  assert.equal(bulk.nodeStart.length, faces.length + 1, 'nodeStart has faceCount + 1 entries')
+  assert.equal(bulk.triStart.length, faces.length + 1, 'triStart has faceCount + 1 entries')
+  assert.ok(bulk.nodeStart[0] === 0 && bulk.triStart[0] === 0, 'offsets start at 0')
+  assert.equal(bulk.nodeStart[faces.length] * 3, bulk.nodes.length, 'nodeStart ends at the nodes')
+  assert.equal(bulk.triStart[faces.length] * 3, bulk.triangles.length, 'triStart ends at the triangles')
+  faces.forEach((face, f) => {
+    assert.ok(bulk.nodeStart[f] <= bulk.nodeStart[f + 1] && bulk.triStart[f] <= bulk.triStart[f + 1],
+      'offsets are monotonic')
+    const ref = referenceFaceMesh(face)
+    const one = oc.OversolvedMesh.FaceTriangulation(face)
+    assert.ok(ref !== null && one !== null, 'every face of the meshed cut has a triangulation')
+    assert.deepEqual([...one.nodes], ref.nodes, `FaceTriangulation nodes, face ${f}`)
+    assert.deepEqual([...one.triangles], ref.triangles, `FaceTriangulation triangles, face ${f}`)
+    assert.deepEqual([...bulk.nodes.subarray(3 * bulk.nodeStart[f], 3 * bulk.nodeStart[f + 1])],
+      ref.nodes, `ShapeTriangulation nodes, face ${f}`)
+    assert.deepEqual([...bulk.triangles.subarray(3 * bulk.triStart[f], 3 * bulk.triStart[f + 1])],
+      ref.triangles, `ShapeTriangulation triangles, face ${f}`)
+    if (isReversedFace(face)) reversedSeen++
+    if (!moved) meshNodes += ref.nodes.length / 3
+  })
+  if (moved) {
+    const base = oc.OversolvedMesh.ShapeTriangulation(cutShape)
+    assert.equal(base.nodes.length, bulk.nodes.length, 'the move shares the triangulation')
+    const offset = [1, 2, 3]
+    assert.ok(bulk.nodes.every((x, i) => Math.abs(x - base.nodes[i] - offset[i % 3]) < 1e-9),
+      'the moved shape\'s nodes are in world coordinates')
+  }
+}
+assert.ok(reversedSeen > 0, 'a REVERSED face was compared')
+const unmeshedBox = new oc.BRepPrimAPI_MakeBox_2(1, 2, 3)
+const unmeshedFace = facesOf(unmeshedBox.Shape())[0]
+assert.equal(oc.OversolvedMesh.FaceTriangulation(unmeshedFace), null, 'an unmeshed face reads as null')
+const unmeshed = oc.OversolvedMesh.ShapeTriangulation(unmeshedBox.Shape())
+assert.ok(unmeshed.faceCount === 6 && unmeshed.nodes.length === 0 && unmeshed.triStart[6] === 0,
+  'unmeshed faces are empty blocks')
+console.log(`bulk mesh: ${meshNodes} nodes match the per-call read, ${reversedSeen} reversed faces, moved copy in world coordinates`)
+
+// The facts row as the consumer's faceSurfaceTypeAndNormal, faceCentroid,
+// faceArea, faceSurfaceFrame and faceCylinderAxis compute it, NaN for absent.
+const S = oc.GeomAbs_SurfaceType
+function referenceFacts(face) {
+  const row = new Array(oc.OversolvedFaceFacts.Stride()).fill(NaN)
+  const xyz = (slot, p) => { row[slot] = p.X(); row[slot + 1] = p.Y(); row[slot + 2] = p.Z(); p.delete() }
+  const adaptor = new oc.BRepAdaptor_Surface_2(face, true)
+  const type = adaptor.GetType().value
+  row[0] = type
+  const props = new oc.GProp_GProps_1()
+  oc.BRepGProp.SurfaceProperties_1(face, props, false, false)
+  xyz(1, props.CentreOfMass())
+  row[4] = props.Mass()
+  props.delete()
+  const u = (adaptor.FirstUParameter() + adaptor.LastUParameter()) / 2
+  const v = (adaptor.FirstVParameter() + adaptor.LastVParameter()) / 2
+  const slProps = new oc.BRepLProp_SLProps_1(adaptor, u, v, 1, 1e-9)
+  const sign = isReversedFace(face) ? -1 : 1
+  if (slProps.IsNormalDefined()) {
+    const n = slProps.Normal()
+    row[5] = n.X() * sign; row[6] = n.Y() * sign; row[7] = n.Z() * sign
+    n.delete()
+  }
+  slProps.delete()
+  row[8] = sign < 0 ? 1 : 0
+  const frame = (surface) => {
+    const axis = surface.Axis()
+    xyz(9, axis.Direction())
+    axis.delete()
+    const pos = surface.Position()
+    xyz(12, pos.Location())
+    pos.delete()
+  }
+  if (type === S.GeomAbs_Cylinder.value) {
+    const cyl = adaptor.Cylinder()
+    frame(cyl)
+    row[15] = cyl.Radius()
+    cyl.delete()
+    const p = new oc.gp_Pnt_1()
+    const du = new oc.gp_Vec_1()
+    const dv = new oc.gp_Vec_1()
+    adaptor.D1(u, v, p, du, dv)
+    const [x, y, z] = [dv.X(), dv.Y(), dv.Z()]
+    const len = Math.sqrt(x * x + y * y + z * z)
+    if (!(len < 1e-12)) { row[18] = x / len; row[19] = y / len; row[20] = z / len }
+    p.delete(); du.delete(); dv.delete()
+  } else if (type === S.GeomAbs_Cone.value) {
+    const cone = adaptor.Cone()
+    frame(cone)
+    row[15] = cone.RefRadius()
+    row[16] = Math.abs(cone.SemiAngle())
+    cone.delete()
+  } else if (type === S.GeomAbs_Sphere.value) {
+    const sphere = adaptor.Sphere()
+    row[9] = 0; row[10] = 0; row[11] = 1
+    const pos = sphere.Position()
+    xyz(12, pos.Location())
+    pos.delete()
+    row[15] = sphere.Radius()
+    sphere.delete()
+  } else if (type === S.GeomAbs_Torus.value) {
+    const torus = adaptor.Torus()
+    frame(torus)
+    row[15] = torus.MajorRadius()
+    row[17] = torus.MinorRadius()
+    torus.delete()
+  }
+  adaptor.delete()
+  return row
+}
+
+const stride = oc.OversolvedFaceFacts.Stride()
+assert.equal(stride, 21, 'OversolvedFaceFacts.Stride')
+const factShapes = [
+  ['cut', cutShape],
+  ['moved cut', movedShape],
+  ['cone', new oc.BRepPrimAPI_MakeCone_1(3, 1, 4).Shape()],
+  ['sphere', new oc.BRepPrimAPI_MakeSphere_1(2.5).Shape()],
+  ['torus', new oc.BRepPrimAPI_MakeTorus_1(5, 1.5).Shape()],
+]
+const typesSeen = new Set()
+let planes = 0
+let cutCylinders = 0
+for (const [label, shape] of factShapes) {
+  const faces = facesOf(shape)
+  const { faceCount, facts } = oc.OversolvedFaceFacts.Read(shape)
+  assert.ok(facts instanceof Float64Array, 'facts is a Float64Array')
+  assert.equal(faceCount, faces.length, `${label}: face count`)
+  assert.equal(facts.length, faceCount * stride, `${label}: facts length`)
+  faces.forEach((face, f) => {
+    const row = facts.subarray(f * stride, (f + 1) * stride)
+    const ref = referenceFacts(face)
+    // Object.is: exact, and NaN equals NaN.
+    ref.forEach((value, slot) => assert.ok(Object.is(row[slot], value),
+      `${label} face ${f} slot ${slot}: ${row[slot]} is the per-call ${value}`))
+    typesSeen.add(row[0])
+    if (row[0] === S.GeomAbs_Plane.value) {
+      planes++
+      assert.ok(row.subarray(9, 21).every(Number.isNaN), `${label}: a planar face has no frame`)
+    }
+    if (label === 'cut' && row[0] === S.GeomAbs_Cylinder.value) {
+      assert.equal(row[15], 2, 'the cut\'s cylindrical face has radius 2')
+      cutCylinders++
+    }
+  })
+}
+assert.equal(cutCylinders, 1, 'the cut has one cylindrical face')
+for (const t of ['Plane', 'Cylinder', 'Cone', 'Sphere', 'Torus']) {
+  assert.ok(typesSeen.has(S[`GeomAbs_${t}`].value), `facts covered a ${t} face`)
+}
+console.log(`face facts: ${factShapes.length} shapes, ${planes} planar faces, every slot equals the per-call read`)
+
+// Not an assert: the per-call against the bulk read of a finer mesh, so a
+// regression on either side shows in the CI log.
+const fine = new oc.BRepBuilderAPI_Copy_2(cutShape, true, false).Shape()
+assert.equal(oc.OversolvedMesh.MeshShape(fine, 0.001, false, 0.02), true, 'fine MeshShape')
+let started = performance.now()
+let perCallNodes = 0
+for (const face of facesOf(fine)) perCallNodes += referenceFaceMesh(face).nodes.length / 3
+const perCallMs = performance.now() - started
+started = performance.now()
+const fineBulk = oc.OversolvedMesh.ShapeTriangulation(fine)
+const bulkMs = performance.now() - started
+assert.equal(fineBulk.nodes.length / 3, perCallNodes, 'fine mesh: same node count both ways')
+console.log(`mesh timing: ${perCallNodes} nodes, ${fineBulk.triangles.length / 3} triangles, per-call ${perCallMs.toFixed(1)} ms, bulk ${bulkMs.toFixed(1)} ms`)
+
+// ─── unbound type probe ───
 
 // Embind registers a member whose signature names an unbound type, and only
 // throws when it is called. The throw sits at the member's own argument count,

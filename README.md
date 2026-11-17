@@ -52,8 +52,9 @@ left out.
 - `manifest.json`: the pin, the `emcc` version that built it, this repo's build commit and the sha256 of each file
 
 `just smoke` runs a boolean, a fillet over two fused cylinders, a STEP round
-trip through the in-memory filesystem with the transfer map's per-face ids, and
-a C++ exception crossing into JS. It also calls every registered member with no
+trip through the in-memory filesystem with the transfer map's per-face ids, a
+C++ exception crossing into JS, and the bulk readers against their per-call
+equivalents, with a timing line for each way of reading a mesh. It also calls every registered member with no
 arguments: a member whose signature names an unbound type throws "unbound
 types" at that call, before any argument check, so the test fails by name
 instead of leaving the problem for the first caller.
@@ -126,6 +127,52 @@ Embind allows one registration per class, so those are implemented in
 `MANUAL_MEMBERS` in `scripts/bindgen.py` registers each on the generated class.
 `HashCode` keeps the 7.7 contract: a value in `[1, upperBound]` computed from
 the TShape and the location.
+
+### Bulk readers
+
+Reading a mesh through the per-call API costs several embind crossings per
+node and per triangle. [`bindings/oversolved_mesh.cpp`](bindings/oversolved_mesh.cpp)
+adds two classes of static functions (the `Oversolved` prefix marks them as
+this repo's, not OCCT API) that do the same reads in one call and return plain
+JS objects of typed arrays. Every array is a JS-owned copy, never a view into
+the wasm heap, so it stays valid after the call and across memory growth. Each
+value equals what the per-call reads give, bit for bit; `just smoke` compares
+the two.
+
+- `oc.OversolvedMesh.MeshShape(shape, linear, relative, angular)` runs
+  `BRepMesh_IncrementalMesh` once over the whole shape (not in parallel) and
+  returns `IsDone()`.
+- `oc.OversolvedMesh.FaceTriangulation(face)` reads an already meshed face:
+  `{ nodes: Float64Array, triangles: Int32Array }`, or `null` when the face has
+  no triangulation (`BRep_Tool::Triangulation` with `Poly_MeshPurpose_NONE`).
+  `nodes` holds x, y, z per node, each `Node(i)` moved by the face location's
+  transformation. `triangles` holds three 0-based node indices per
+  `Triangle(i)`, written `a, b, c`, or `a, c, b` when the face is `REVERSED`.
+- `oc.OversolvedMesh.ShapeTriangulation(shape)` returns `{ faceCount, nodes,
+  triangles, nodeStart, triStart }` (`null` for a null shape): every face in
+  `TopExp_Explorer(shape, TopAbs_FACE)` order, each block built as
+  `FaceTriangulation` builds it and concatenated. Triangle indices stay local
+  to their face. `nodeStart` and `triStart` are `Int32Array`s of `faceCount + 1`
+  prefix offsets, counted in nodes and triangles, not array slots. A face with
+  no triangulation is an empty block.
+- `oc.OversolvedFaceFacts.Read(shape)` returns `{ faceCount, facts }`, one row
+  of `oc.OversolvedFaceFacts.Stride()` doubles per face in explorer order. NaN
+  marks a slot that does not apply. The adaptor is `BRepAdaptor_Surface(face,
+  true)` and (u, v) is the midpoint of its parameter range.
+
+| slot  | value              | definition |
+|-------|--------------------|------------|
+| 0     | surface type       | `GetType()` as the `GeomAbs_SurfaceType` integer |
+| 1-3   | centroid           | `BRepGProp::SurfaceProperties(face, props, false, false)`, then `CentreOfMass()` |
+| 4     | area               | the same props' `Mass()` |
+| 5-7   | normal             | `BRepLProp_SLProps(adaptor, u, v, 1, 1e-9).Normal()`, negated on a `REVERSED` face; NaN when `IsNormalDefined()` is false |
+| 8     | reversed           | 1 or 0 |
+| 9-11  | frame axis         | cylinder, cone, torus: `Axis().Direction()`; sphere: 0, 0, 1 |
+| 12-14 | frame origin       | cylinder, cone, torus, sphere: `Position().Location()` |
+| 15    | radius             | cylinder and sphere `Radius()`, cone `RefRadius()`, torus `MajorRadius()` |
+| 16    | cone semi angle    | `abs(SemiAngle())` |
+| 17    | torus minor radius | `MinorRadius()` |
+| 18-20 | cylinder dv axis   | `D1(u, v, p, du, dv)`, dv divided by `sqrt(x*x + y*y + z*z)`; NaN when that length is below 1e-12 |
 
 ## Release
 
