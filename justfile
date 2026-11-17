@@ -107,6 +107,12 @@ bindings:
 # as "memory access out of bounds" instead of raising. Smoke reads the size back
 # from the exported stack bounds, so dropping this line fails the test.
 
+# Embind builds every member's JS invoker with `new Function` while the module
+# instantiates, and most are never called. patch_glue.py defers each to its
+# first call, about a fifth off `await occt()`; -sEMBIND_AOT saved half as much
+# and grew occt.js by half. It runs before the manifest hashes occt.js, and
+# fails the link when its anchor is gone, so an emsdk bump cannot drop it.
+
 # Compile the bindings and link them with the OCCT libraries into tmp/dist.
 # -I bindings makes manual.h visible to the generated file.
 link:
@@ -124,6 +130,7 @@ link:
         -sEXPORTED_RUNTIME_METHODS=FS,getExceptionMessage,decrementExceptionRefcount \
         -o {{dist}}/occt.js
     cp {{occt_src}}/LICENSE_LGPL_21.txt {{occt_src}}/OCCT_LGPL_EXCEPTION.txt {{dist}}/
+    python3 scripts/patch_glue.py {{dist}}/occt.js
     {{em}} python3 scripts/manifest.py {{dist}} {{emsdk_version}}
 
 
